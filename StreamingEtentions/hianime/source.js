@@ -86,18 +86,6 @@ class HiAnime {
     return s;
   }
 
-  _looksLikeUrlOrId(s) {
-    const v = String(s || "").trim().toLowerCase();
-    if (!v) return false;
-    if (/^https?:\/\//i.test(v)) return true;
-    // common patterns where "query" is not a real title
-    if (v.includes("anilist.co/anime/")) return true;
-    if (v.includes("myanimelist.net/anime/")) return true;
-    if (/^\d+$/.test(v)) return true;
-    if (v.startsWith("anime/") || v.startsWith("manga/")) return true;
-    return false;
-  }
-
   _extractId(input) {
     const s0 = String(input || "").trim();
     if (!s0) return "";
@@ -278,7 +266,6 @@ class HiAnime {
 
       let finalPath = href;
       if (!finalPath.startsWith("watch/") && !finalPath.includes("/watch/")) {
-        // leave as-is
       } else {
         finalPath = finalPath.replace(/^\/+/, "");
       }
@@ -466,22 +453,12 @@ class HiAnime {
     this._cleanCache();
 
     arg = this._parseArg(arg);
-
-    // media might come in as a string in some bridges
-    let media = arg.media || {};
-    if (typeof media === "string") {
-      try { media = JSON.parse(media); } catch { media = {}; }
-    }
-
-    // If query is a URL/ID, use media title as actual keyword
-    let qRaw = String(arg.query || "").trim();
-    const mediaTitle = String(media.englishTitle || media.romajiTitle || "").trim();
-    const q = (this._looksLikeUrlOrId(qRaw) && mediaTitle) ? mediaTitle : qRaw;
-
+    const q = String(arg.query || "").trim();
     if (!q) return [];
 
     const track = this._getTrack(arg);
-    const start = (media && media.startDate) ? media.startDate : {};
+    const media = arg.media || {};
+    const start = media.startDate || {};
     const targetYear = parseInt(start.year, 10) || 0;
 
     const normTarget = this._norm(media.englishTitle || media.romajiTitle || q);
@@ -547,34 +524,62 @@ class HiAnime {
     return results;
   }
 
+  _fetchEpisodeListPage(numId, page) {
+    const url = `${this.baseUrl}/ajax/v2/episode/list/${numId}` + (page && page > 1 ? `?page=${page}` : "");
+    const data = this._fetchJson(url, this._headers(true, "/"));
+    return this._clean(String(data.html || ""));
+  }
+
   findEpisodes(Id) {
     const [id, trackRaw] = String(Id || "").split("/");
     const track = trackRaw === "dub" ? "dub" : "sub";
     const numId = this._extractId(id);
     if (!numId) return [];
 
-    const data = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/list/${numId}`, this._headers(true, "/"));
-    const html = this._clean(String(data.html || ""));
-    if (!html) return [];
-
     const episodes = [];
-    const re = /<a[^>]*class=(["'])[^\1]*\bep-item\b[^\1]*\1[^>]*data-number=(["'])([^"']+)\2[^>]*data-id=(["'])(\d+)\4[^>]*href=(["'])([^"']+)\6[\s\S]*?<div class=(["'])[^\8]*\bep-name\b[^\8]*\8[^>]*title=(["'])([^"']*)\9/gi;
+    const seen = new Set();
 
-    let m;
-    while ((m = re.exec(html)) !== null) {
-      const num = parseFloat(m[3]);
-      const epId = String(m[5] || "").trim();
-      const href = String(m[7] || "").trim();
-      const title = this._clean(m[10]);
+    for (let page = 1; page <= 12; page++) {
+      const html = this._fetchEpisodeListPage(numId, page);
+      if (!html) break;
 
-      if (!epId || !isFinite(num)) continue;
+      const aTagRe = /<a\b[^>]*\bclass=(["'])[^\1]*\bep-item\b[^\1]*\1[^>]*>/gi;
+      const tags = html.match(aTagRe) || [];
+      if (!tags.length) break;
 
-      episodes.push({
-        id: `${epId}/${track}`,
-        number: num,
-        title: title || `Episode ${num}`,
-        url: href ? (href.startsWith("http") ? href : `${this.baseUrl}${href}`) : ""
-      });
+      let addedThisPage = 0;
+
+      for (const tag of tags) {
+        const idM = tag.match(/\bdata-id=(["'])(\d+)\1/i);
+        const numM = tag.match(/\bdata-number=(["'])([^"']+)\1/i);
+        const hrefM = tag.match(/\bhref=(["'])([^"']+)\1/i);
+
+        const epId = idM ? String(idM[2] || "").trim() : "";
+        const num = numM ? parseFloat(numM[2]) : NaN;
+        const href = hrefM ? String(hrefM[2] || "").trim() : "";
+
+        if (!epId || !isFinite(num)) continue;
+
+        const key = `${epId}/${track}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const fullUrl = href
+          ? (href.startsWith("http") ? href : `${this.baseUrl}${href}`)
+          : "";
+
+        episodes.push({
+          id: `${epId}/${track}`,
+          number: num,
+          title: `Episode ${num}`,
+          url: fullUrl
+        });
+
+        addedThisPage++;
+      }
+
+      if (addedThisPage === 0) break;
+
     }
 
     episodes.sort((a, b) => a.number - b.number);
