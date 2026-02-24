@@ -3,29 +3,26 @@ class HiAnime {
     this.baseUrl = "https://hianime.to";
     this._cache = {};
     this._cacheMaxAge = 1000 * 60 * 5;
-    this._defaultServers = ["HD-1", "HD-2", "HD-3"];
-    this._defaultTimeoutMs = 12000;
+  }
+
+  getSettings() {
+    return {
+      episodeServers: ["HD-1", "HD-2", "HD-3"],
+      supportsDub: true
+    };
   }
 
   getMetaData() {
     return {
       id: "hianime",
       name: "HiAnime",
-      version: "3.1.1",
+      version: "3.1.2",
       author: "Fixed",
       description: "Streams from HiAnime.to with fallback API",
       url: this.baseUrl,
-      supportsSub: true,
       supportsDub: true,
-      settings: {
-        episodeServers: this._defaultServers.slice()
-      }
-    };
-  }
-
-  getSettings() {
-    return {
-      episodeServers: this._defaultServers.slice()
+      supportsSub: true,
+      settings: this.getSettings()
     };
   }
 
@@ -33,41 +30,15 @@ class HiAnime {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  _nativeFetch(url, options = {}, retries = 2) {
-    const hasAbort = typeof AbortController !== "undefined";
-    const controller = hasAbort ? new AbortController() : null;
-
-    const timeout = setTimeout(() => {
-      try { controller && controller.abort(); } catch (_) {}
-    }, this._defaultTimeoutMs);
-
-    const opts = controller ? { ...(options || {}), signal: controller.signal } : (options || {});
-
-    return fetch(url, opts)
-      .finally(() => clearTimeout(timeout))
-      .catch(async (err) => {
-        clearTimeout(timeout);
-        if (retries > 0) {
-          try { console.log(`Fetch failed for ${url}, retrying... (${retries} left)`); } catch (_) {}
-          await this._sleep(500);
-          return this._nativeFetch(url, options, retries - 1);
-        }
-        throw err;
-      });
-  }
-
-  async _fetchText(url, options) {
-    const res = await this._nativeFetch(url, options);
-    return res.text();
-  }
-
-  async _fetchJsonFromText(url, options) {
-    const raw = await this._fetchText(url, options);
-    try {
-      return JSON.parse(raw);
-    } catch (_) {
-      throw new Error("Non-JSON response (blocked or server changed)");
-    }
+  _nativeFetch(url, options, retries = 2) {
+    return fetch(url, options).catch(async (err) => {
+      if (retries > 0) {
+        console.log(`Fetch failed for ${url}, retrying... (${retries} left)`);
+        await this._sleep(500);
+        return this._nativeFetch(url, options, retries - 1);
+      }
+      throw err;
+    });
   }
 
   _getCached(key) {
@@ -88,24 +59,16 @@ class HiAnime {
     const normalize = (title) => {
       return (title || "")
         .toLowerCase()
-        .replace(/(season|cour|part|the animation|the movie|movie)/g, "")
+        .replace(/(season|cour|part|the animation|the movie|movie|uncensored)/g, "")
         .replace(/\d+(st|nd|rd|th)/g, (m) => m.replace(/st|nd|rd|th/, ""))
         .replace(/[^a-z0-9]+/g, "")
         .replace(/(?<!i)ii(?!i)/g, "2");
     };
 
-    const normalizeTitle = (title) => {
-      return (title || "")
-        .toLowerCase()
-        .replace(/(season|cour|part|uncensored)/g, "")
-        .replace(/\d+(st|nd|rd|th)/g, (m) => m.replace(/st|nd|rd|th/, ""))
-        .replace(/[^a-z0-9]+/g, "");
-    };
-
     const decodeHtmlEntities = (str) => {
       return (str || "")
         .replace(/\\u0026/g, "&")
-        .replace(/&#(\d+);?/g, (m, dec) => String.fromCharCode(dec))
+        .replace(/&#(\d+);?/g, (m, dec) => String.fromCharCode(parseInt(dec, 10)))
         .replace(/&quot;/g, '"')
         .replace(/&apos;/g, "'")
         .replace(/&amp;/g, "&")
@@ -114,254 +77,247 @@ class HiAnime {
     };
 
     const levenshteinSimilarity = (a, b) => {
+      a = a || "";
+      b = b || "";
       const lenA = a.length;
       const lenB = b.length;
+      if (!lenA && !lenB) return 1;
+      if (!lenA || !lenB) return 0;
+
       const dp = Array.from({ length: lenA + 1 }, () => new Array(lenB + 1).fill(0));
       for (let i = 0; i <= lenA; i++) dp[i][0] = i;
       for (let j = 0; j <= lenB; j++) dp[0][j] = j;
+
       for (let i = 1; i <= lenA; i++) {
         for (let j = 1; j <= lenB; j++) {
           if (a[i - 1] === b[j - 1]) dp[i][j] = dp[i - 1][j - 1];
           else dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
         }
       }
+
       const distance = dp[lenA][lenB];
       const maxLen = Math.max(lenA, lenB);
-      return maxLen === 0 ? 0 : (1 - distance / maxLen);
+      return 1 - distance / maxLen;
     };
 
     const start = query && query.media ? query.media.startDate : null;
+    const startYear = start && start.year ? start.year : 0;
+    const startMonth = start && start.month ? start.month : 0;
+
     const targetNormJP = normalize(query?.media?.romajiTitle);
-    const targetNorm = query?.media?.englishTitle ? normalize(query.media.englishTitle) : targetNormJP;
+    const targetNormEN = normalize(query?.media?.englishTitle);
+    const targetNormQ = normalize(query?.query);
+
+    const targetNorm = targetNormEN || targetNormJP || targetNormQ;
+    const targetNormAlt = targetNormJP || targetNormEN || targetNormQ;
 
     const monthMap = {
       Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6,
       Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12,
     };
 
-    const fetchMatches = async (url) => {
-      const reply = await this._fetchJsonFromText(url, {
-        headers: { "X-Requested-With": "XMLHttpRequest", "Accept": "application/json, text/plain, */*" }
-      });
-
-      const html = reply && reply.html ? String(reply.html) : "";
-
-      const regex = /<a href="\/([^"]+)" class="nav-item">[\s\S]*?<h3 class="film-name"[^>]*data-jname="([^"]+)"[^>]*>([^<]+)<\/h3>[\s\S]*?<div class="film-infor">\s*<span>([^<]+)<\/span>\s*<i[^>]*><\/i>\s*([^<]+)\s*<i[^>]*><\/i>/g;
-
-      const matches = [...html.matchAll(regex)]
-        .map((m) => {
-          const pageUrl = m[1];
-          if (!pageUrl || pageUrl.startsWith("search?")) return null;
-
-          const jname = (m[2] || "").trim();
-          const title = (m[3] || "").trim();
-          const dateStr = (m[4] || "").trim();
-          const format = (m[5] || "").trim().toUpperCase();
-
-          let startDate = { year: 0, month: 0, day: 0 };
-          const dateMatch = dateStr.match(/([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})/);
-          if (dateMatch) {
-            const month = monthMap[dateMatch[1]];
-            const day = parseInt(dateMatch[2], 10);
-            const year = parseInt(dateMatch[3], 10);
-            startDate = { year, month: month || 0, day: isNaN(day) ? 0 : day };
-          }
-
-          const idMatch = pageUrl.match(/-(\d+)$/);
-          const id = idMatch ? idMatch[1] : pageUrl;
-
-          return {
-            id,
-            pageUrl,
-            title: decodeHtmlEntities(title),
-            normTitleJP: normalize(decodeHtmlEntities(jname)),
-            normTitle: normalize(decodeHtmlEntities(title)),
-            startDate,
-            format,
-          };
-        })
-        .filter(Boolean);
-
-      return matches;
+    const parseStartDate = (dateStr) => {
+      const s = (dateStr || "").trim();
+      const m = s.match(/([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})/);
+      if (!m) return { year: 0, month: 0, day: 0 };
+      const month = monthMap[m[1]] || 0;
+      return { year: parseInt(m[3], 10) || 0, month, day: parseInt(m[2], 10) || 0 };
     };
 
-    const url = `${this.baseUrl}/ajax/search/suggest?keyword=${encodeURIComponent(query?.query || "")}`;
-    let matches;
-    try {
-      matches = await fetchMatches(url);
-    } catch (e) {
-      try { console.warn("Suggest search failed:", e && e.message ? e.message : e); } catch (_) {}
-      return [];
-    }
+    const ensureWatchPath = (href) => {
+      const h = (href || "").replace(/^\/+/, "");
+      if (!h) return "";
+      // h can be "watch/slug-12345?ep=..." OR "slug-12345" (old suggest)
+      if (h.startsWith("watch/")) return h.split("?")[0];
+      if (h.startsWith("search?")) return "";
+      // If it's already a full slug path, keep it; watch pages on HiAnime are /watch/<slug>
+      return h.includes("/") ? h.split("?")[0] : `watch/${h.split("?")[0]}`;
+    };
 
-    if (!matches || matches.length === 0) return [];
+    const extractIdFromHref = (href) => {
+      const h = href || "";
+      const m = h.match(/-(\d+)(?:\b|$)/);
+      return m ? m[1] : "";
+    };
 
-    const exactTitle = (m) => m.normTitle === targetNorm || m.normTitleJP === targetNormJP;
-    const looseTitle = (m) =>
-      levenshteinSimilarity(m.normTitle, targetNorm) > 0.8 ||
-      levenshteinSimilarity(m.normTitleJP, targetNormJP) > 0.8;
-    const looserTitle = (m) =>
-      m.normTitle.includes(targetNorm) ||
-      m.normTitleJP.includes(targetNormJP) ||
-      targetNorm.includes(m.normTitle) ||
-      targetNormJP.includes(m.normTitleJP) ||
-      levenshteinSimilarity(m.normTitle, targetNorm) > 0.6 ||
-      levenshteinSimilarity(m.normTitleJP, targetNormJP) > 0.6;
+    const fetchMatches = async (url) => {
+      const reply = await this._nativeFetch(url).then(r => r.json());
+      const html = reply && reply.html ? reply.html : "";
 
-    const dateYM = (m) => m.startDate?.year === start?.year && m.startDate?.month === start?.month;
-    const dateY = (m) => m.startDate?.year === start?.year;
-    const exactFormat = (m) => (m.format || "") === String(query?.media?.format || "").toUpperCase();
+      // Works for suggest HTML blocks; tries to capture title + data-jname + date + format.
+      const regex = /<a href="\/([^"]+)" class="nav-item">[\s\S]*?<h3 class="film-name"[^>]*data-jname="([^"]+)"[^>]*>([^<]+)<\/h3>[\s\S]*?<div class="film-infor">\s*<span>([^<]+)<\/span>\s*<i[^>]*><\/i>\s*([^<]+)\s*<i[^>]*><\/i>/g;
 
-    const matchTiers = [
-      (m) => exactTitle(m) && dateYM(m) && exactFormat(m),
-      (m) => exactTitle(m) && dateY(m) && exactFormat(m),
-      (m) => looseTitle(m) && dateYM(m) && exactFormat(m),
-      (m) => looseTitle(m) && dateY(m) && exactFormat(m),
-    ];
+      const out = [];
+      for (const m of html.matchAll(regex)) {
+        const rawHref = m[1];
+        if (!rawHref || rawHref.startsWith("search?")) continue;
 
-    let filtered = [];
+        const pagePath = ensureWatchPath(rawHref);
+        if (!pagePath) continue;
+
+        const jname = decodeHtmlEntities((m[2] || "").trim());
+        const title = decodeHtmlEntities((m[3] || "").trim());
+        const dateStr = (m[4] || "").trim();
+        const format = ((m[5] || "").trim() || "").toUpperCase();
+
+        const id = extractIdFromHref(pagePath) || extractIdFromHref(rawHref) || pagePath;
+
+        out.push({
+          id,
+          pagePath,
+          title,
+          normTitle: normalize(title),
+          normTitleJP: normalize(jname),
+          startDate: parseStartDate(dateStr),
+          format
+        });
+      }
+      return out;
+    };
+
+    const scoreCandidate = (m) => {
+      const t1 = levenshteinSimilarity(m.normTitle, targetNorm);
+      const t2 = levenshteinSimilarity(m.normTitleJP, targetNormAlt);
+      let titleScore = Math.max(t1, t2);
+
+      // substring boosts (useful when site has extra words)
+      if (m.normTitle.includes(targetNorm) || targetNorm.includes(m.normTitle)) titleScore = Math.max(titleScore, 0.86);
+      if (m.normTitleJP.includes(targetNormAlt) || targetNormAlt.includes(m.normTitleJP)) titleScore = Math.max(titleScore, 0.86);
+
+      const wantFormat = (query?.media?.format || "").toUpperCase();
+      const formatScore = !wantFormat ? 0.75 : (m.format === wantFormat ? 1 : 0.65);
+
+      // If the site doesn't provide year/month, don't punish hard.
+      const y = m.startDate?.year || 0;
+      const mo = m.startDate?.month || 0;
+
+      let yearScore = 0.75; // unknown / not provided
+      if (startYear && y) yearScore = (startYear === y ? 1 : 0);
+
+      let monthBonus = 0;
+      if (startYear && y && startYear === y && startMonth && mo) {
+        monthBonus = (startMonth === mo ? 0.1 : 0);
+      }
+
+      // Weighted final
+      return (titleScore * 0.78) + (yearScore * 0.14) + (formatScore * 0.08) + monthBonus;
+    };
+
+    const base = `${this.baseUrl}/ajax/search/suggest?keyword=${encodeURIComponent(query.query)}`;
+
+    const bestById = new Map();
+    let anyUseful = false;
 
     for (let page = 1; page <= 7; page++) {
-      const pageUrl = page === 1 ? url : `${url}&page=${page}`;
-      let pageMatches;
-      try {
-        pageMatches = await fetchMatches(pageUrl);
-      } catch (_) {
-        break;
-      }
+      const pageUrl = page === 1 ? base : `${base}&page=${page}`;
+      const pageMatches = await fetchMatches(pageUrl);
 
-      if (!pageMatches || !pageMatches.length) break;
+      if (!pageMatches.length) break;
 
-      const hasLoose = pageMatches.some(looserTitle);
-      if (!hasLoose) break;
-
-      for (const tier of matchTiers) {
-        filtered = pageMatches.filter(tier);
-        if (filtered.length) break;
-      }
-
-      if (filtered.length) break;
-    }
-
-    let results = (filtered.length ? filtered : matches).map((m) => ({
-      id: `${m.id}/${query?.dub ? "dub" : "sub"}`,
-      title: m.title,
-      url: `${this.baseUrl}/${m.pageUrl}`,
-      subOrDub: query?.dub ? "dub" : "sub",
-    }));
-
-    if (!query?.media?.startDate || !query.media.startDate.year) {
-      const fetchMatches2 = async (url2) => {
-        const html = await this._fetchText(url2, {});
-        const regex = /<a href="\/watch\/([^"]+)"[^>]+title="([^"]+)"[^>]+data-id="(\d+)"/g;
-
-        return [...html.matchAll(regex)].map((m) => {
-          const id = m[3];
-          const pageUrl = m[1];
-          const title = m[2];
-          const jnameRegex = new RegExp(
-            `<h3 class="film-name">[\\s\\S]*?<a[^>]+href="\\/${pageUrl}[^"]*"[^>]+data-jname="([^"]+)"`,
-            "i"
-          );
-          const jnameMatch = html.match(jnameRegex);
-          const jname = jnameMatch ? jnameMatch[1] : null;
-          return {
-            id,
-            pageUrl,
-            title: decodeHtmlEntities(title),
-            normTitleJP: normalizeTitle(decodeHtmlEntities(jname)),
-            normTitle: normalizeTitle(decodeHtmlEntities(title)),
-          };
-        });
-      };
-
-      const url2 = `${this.baseUrl}/search?keyword=${encodeURIComponent(query?.query || "")}`;
-      let matches2 = [];
-      try {
-        matches2 = await fetchMatches2(url2);
-      } catch (_) {
-        matches2 = [];
-      }
-
-      const qn = normalizeTitle(query?.query || "");
-      filtered = matches2.filter((m) => {
-        return (
-          m.normTitle === qn ||
-          m.normTitleJP === qn ||
-          m.normTitle.includes(qn) ||
-          m.normTitleJP.includes(qn) ||
-          qn.includes(m.normTitle) ||
-          qn.includes(m.normTitleJP)
+      // Track if this page has anything vaguely similar; otherwise stop early.
+      const maxTitleSim = pageMatches.reduce((mx, m) => {
+        const t = Math.max(
+          levenshteinSimilarity(m.normTitle, targetNorm),
+          levenshteinSimilarity(m.normTitleJP, targetNormAlt)
         );
-      });
+        return Math.max(mx, t);
+      }, 0);
 
-      filtered.sort((a, b) => {
-        const A = normalizeTitle(a.title);
-        const B = normalizeTitle(b.title);
-        if (A.length !== B.length) return A.length - B.length;
-        return A.localeCompare(B);
-      });
+      if (maxTitleSim < 0.35 && anyUseful) break;
+      if (maxTitleSim >= 0.35) anyUseful = true;
 
-      if (filtered.length) {
-        results = filtered.map((m) => ({
-          id: `${m.id}/${query?.dub ? "dub" : "sub"}`,
-          title: m.title,
-          url: `${this.baseUrl}/${m.pageUrl}`,
-          subOrDub: query?.dub ? "dub" : "sub",
-        }));
+      for (const m of pageMatches) {
+        const s = scoreCandidate(m);
+        const prev = bestById.get(m.id);
+        if (!prev || s > prev._score) {
+          bestById.set(m.id, { ...m, _score: s });
+        }
       }
+
+      // If we already have strong matches, don't keep paging forever.
+      const currentBest = Array.from(bestById.values()).reduce((mx, m) => Math.max(mx, m._score), 0);
+      if (currentBest >= 0.92) break;
     }
 
-    return results;
+    let candidates = Array.from(bestById.values());
+
+    // If filtering was too strict for newer/unknown entries, keep looser candidates.
+    candidates = candidates
+      .filter((m) => m._score >= 0.58)
+      .sort((a, b) => b._score - a._score)
+      .slice(0, 12);
+
+    // Last-resort fallback: if nothing, try the normal search page and match by substring only.
+    if (!candidates.length) {
+      const url2 = `${this.baseUrl}/search?keyword=${encodeURIComponent(query.query)}`;
+      const html = await this._nativeFetch(url2).then(r => r.text());
+
+      const regex2 = /<a href="\/watch\/([^"]+)"[^>]+title="([^"]+)"[^>]+data-id="(\d+)"/g;
+      const out = [];
+      for (const m of html.matchAll(regex2)) {
+        const id = m[3];
+        const pagePath = `watch/${m[1].split("?")[0]}`;
+        const title = decodeHtmlEntities(m[2]);
+        const norm = normalize(title);
+        const sim = Math.max(levenshteinSimilarity(norm, targetNorm), levenshteinSimilarity(norm, targetNormAlt));
+        if (sim >= 0.52 || norm.includes(targetNorm) || targetNorm.includes(norm)) {
+          out.push({ id, pagePath, title, _score: sim });
+        }
+      }
+      out.sort((a, b) => b._score - a._score);
+      candidates = out.slice(0, 12);
+    }
+
+    return candidates.map((m) => ({
+      id: `${m.id}/${query.dub ? "dub" : "sub"}`,
+      title: m.title,
+      url: `${this.baseUrl}/${m.pagePath}`,
+      subOrDub: query.dub ? "dub" : "sub"
+    }));
   }
 
   async getEpisodes(animeId) {
-    const [id, subOrDub] = String(animeId || "").split("/");
+    const [id, subOrDub] = (animeId || "").split("/");
     const cacheKey = `episodes-${id}`;
     const cached = this._getCached(cacheKey);
-    if (cached) return cached.filter((ep) => String(ep.id).endsWith(`/${subOrDub}`));
+    if (cached) return cached.filter(ep => ep.id.endsWith(`/${subOrDub}`));
 
-    const json = await this._fetchJsonFromText(`${this.baseUrl}/ajax/v2/episode/list/${id}`, {
-      headers: { "X-Requested-With": "XMLHttpRequest", "Accept": "application/json, text/plain, */*" }
+    const res = await this._nativeFetch(`${this.baseUrl}/ajax/v2/episode/list/${id}`, {
+      headers: { "X-Requested-With": "XMLHttpRequest" }
     });
-
-    const html = json && json.html ? String(json.html) : "";
+    const json = await res.json();
+    const html = json && json.html ? json.html : "";
 
     const episodes = [];
     const regex = /<a[^>]*class="[^"]*\bep-item\b[^"]*"[^>]*data-number="(\d+)"[^>]*data-id="(\d+)"[^>]*href="([^"]+)"[\s\S]*?<div class="ep-name[^"]*"[^>]*title="([^"]+)"/g;
 
     let match;
     while ((match = regex.exec(html)) !== null) {
-      episodes.push({
-        id: `${match[2]}/sub`,
-        number: parseInt(match[1], 10),
-        url: this.baseUrl + match[3],
-        title: match[4],
-      });
-      episodes.push({
-        id: `${match[2]}/dub`,
-        number: parseInt(match[1], 10),
-        url: this.baseUrl + match[3],
-        title: match[4],
-      });
+      const epNum = parseInt(match[1], 10);
+      const epId = match[2];
+      const epUrl = this.baseUrl + match[3];
+      const epTitle = match[4];
+
+      episodes.push({ id: `${epId}/sub`, number: epNum, url: epUrl, title: epTitle });
+      episodes.push({ id: `${epId}/dub`, number: epNum, url: epUrl, title: epTitle });
     }
 
     this._setCache(cacheKey, episodes);
-    return episodes.filter((ep) => String(ep.id).endsWith(`/${subOrDub}`));
+    return episodes.filter(ep => ep.id.endsWith(`/${subOrDub}`));
   }
 
   async getStreamingLinks(episodeId, server = "default") {
-    const [id, subOrDub] = String(episodeId || "").split("/");
+    const [id, subOrDub] = (episodeId || "").split("/");
     const allowedTypes = subOrDub === "sub" ? ["sub", "raw"] : [subOrDub];
     const typePattern = allowedTypes.join("|");
     const serverName = server !== "default" ? server : "HD-1";
 
-    const serverJson = await this._fetchJsonFromText(
-      `${this.baseUrl}/ajax/v2/episode/servers?episodeId=${encodeURIComponent(id)}`,
-      { headers: { "X-Requested-With": "XMLHttpRequest", "Accept": "application/json, text/plain, */*" } }
-    );
+    const serverJson = await this._nativeFetch(
+      `${this.baseUrl}/ajax/v2/episode/servers?episodeId=${id}`,
+      { headers: { "X-Requested-With": "XMLHttpRequest" } }
+    ).then(res => res.json());
 
-    const serverHtml = serverJson && serverJson.html ? String(serverJson.html) : "";
+    const serverHtml = serverJson && serverJson.html ? serverJson.html : "";
     const regex = new RegExp(
       `<div[^>]*class="item server-item"[^>]*data-type="(${typePattern})"[^>]*data-id="(\\d+)"[^>]*>\\s*<a[^>]*>\\s*${serverName}\\s*</a>`,
       "i"
@@ -372,41 +328,35 @@ class HiAnime {
 
     const serverId = match[2];
 
-    const sourcesJson = await this._fetchJsonFromText(
-      `${this.baseUrl}/ajax/v2/episode/sources?id=${encodeURIComponent(serverId)}`,
-      { headers: { "X-Requested-With": "XMLHttpRequest", "Accept": "application/json, text/plain, */*" } }
-    );
+    const sourcesJson = await this._nativeFetch(
+      `${this.baseUrl}/ajax/v2/episode/sources?id=${serverId}`,
+      { headers: { "X-Requested-With": "XMLHttpRequest" } }
+    ).then(res => res.json());
 
     let decryptData = null;
 
     try {
-      decryptData = await this._extractMegaCloud(String(sourcesJson.link || ""));
+      decryptData = await this._extractMegaCloud(sourcesJson.link);
     } catch (err) {
-      try { console.warn("Primary decrypter failed:", err); } catch (_) {}
+      console.warn("Primary decrypter failed:", err);
     }
 
     if (!decryptData) {
-      try { console.warn("Primary decrypter failed — trying fallback API..."); } catch (_) {}
+      console.warn("Primary decrypter failed — trying fallback API...");
       const fallbackRes = await this._nativeFetch(
-        `https://ac-api.ofchaos.com/api/anime/embed/convert/v2?embedUrl=${encodeURIComponent(String(sourcesJson.link || ""))}`
+        `https://ac-api.ofchaos.com/api/anime/embed/convert/v2?embedUrl=${encodeURIComponent(sourcesJson.link)}`
       );
-      const raw = await fallbackRes.text();
-      try {
-        decryptData = JSON.parse(raw);
-      } catch (_) {
-        throw new Error("Fallback API returned non-JSON");
-      }
+      decryptData = await fallbackRes.json();
     }
 
-    const sourcesArr = Array.isArray(decryptData?.sources) ? decryptData.sources : [];
     const streamSource =
-      sourcesArr.find((s) => s && s.type === "hls") ||
-      sourcesArr.find((s) => s && s.type === "mp4");
+      (decryptData.sources || []).find(s => s.type === "hls") ||
+      (decryptData.sources || []).find(s => s.type === "mp4");
 
     if (!streamSource || !streamSource.file) throw new Error("No valid stream file found");
 
-    const subtitles = (Array.isArray(decryptData?.tracks) ? decryptData.tracks : [])
-      .filter((t) => t && t.kind === "captions" && t.file)
+    const subtitles = (decryptData.tracks || [])
+      .filter(t => t.kind === "captions")
       .map((track, index) => ({
         id: `sub-${index}`,
         language: track.label || "Unknown",
@@ -433,8 +383,6 @@ class HiAnime {
   }
 
   async _extractMegaCloud(embedUrl) {
-    if (!embedUrl) throw new Error("Missing embedUrl");
-
     const url = new URL(embedUrl);
     const baseDomain = `${url.protocol}//${url.host}/`;
 
@@ -445,7 +393,7 @@ class HiAnime {
       "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
     };
 
-    const html = await this._fetchText(embedUrl, { headers });
+    const html = await this._nativeFetch(embedUrl, { headers }).then(r => r.text());
 
     const fileIdMatch = html.match(/<title>\s*File\s+#([a-zA-Z0-9]+)\s*-/i);
     if (!fileIdMatch) throw new Error("file_id not found in embed page");
@@ -463,10 +411,10 @@ class HiAnime {
     }
     if (!nonce) throw new Error("nonce not found");
 
-    const sourcesJson = await this._fetchJsonFromText(
-      `${baseDomain}embed-2/v3/e-1/getSources?id=${encodeURIComponent(fileId)}&_k=${encodeURIComponent(nonce)}`,
+    const sourcesJson = await this._nativeFetch(
+      `${baseDomain}embed-2/v3/e-1/getSources?id=${fileId}&_k=${nonce}`,
       { headers }
-    );
+    ).then(r => r.json());
 
     return {
       sources: sourcesJson.sources,
