@@ -1,9 +1,15 @@
 class HiAnime {
   constructor() {
     this.type = "anime-streaming";
-    this.version = "2.5.1";
+    this.version = "3.0.5";
     this.baseUrl = "https://hianime.to";
-    this._cache = { dub: {}, search: {}, serverCheck: {} };
+    this._cache = {
+      dub: new Map(),
+      search: new Map(),
+      serverCheck: new Map(),
+      _maxSize: 200,
+      _expiry: 5 * 60 * 1000
+    };
   }
 
   getSettings() {
@@ -15,37 +21,38 @@ class HiAnime {
     };
   }
 
-  stream(payload) {
-    return null;
-  }
+  stream() { return null; }
 
-  _fetch(url, headers = {}) {
-    const res = Native.fetch(String(url), "GET", JSON.stringify(headers), "");
-    try {
-      return JSON.parse(res || "{}");
-    } catch {
-      return { ok: false, status: 0, body: "" };
+  _cleanCache() {
+    const now = Date.now();
+    for (const [, cache] of Object.entries(this._cache)) {
+      if (!(cache instanceof Map)) continue;
+
+      if (cache.size > this._cache._maxSize) {
+        const entries = [...cache.entries()];
+        entries.sort((a, b) => (b[1]?.t || 0) - (a[1]?.t || 0));
+        const keep = entries.slice(0, Math.floor(this._cache._maxSize * 0.7));
+        cache.clear();
+        for (const [k, v] of keep) cache.set(k, v);
+      }
+
+      for (const [k, v] of cache) {
+        if (v && v.t && now - v.t > this._cache._expiry) cache.delete(k);
+      }
     }
   }
 
-  _json(url, headers) {
-    const res = this._fetch(url, headers);
-    try {
-      return JSON.parse(String(res.body || "{}"));
-    } catch {
-      return {};
-    }
+  _escapeRegExp(s) {
+    return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
-  _text(url, headers) {
-    return String(this._fetch(url, headers).body || "");
-  }
-
-  _headers(json = true) {
+  _headers(json = true, refererPath = "/") {
+    const ref = this.baseUrl + (refererPath && String(refererPath).startsWith("/") ? refererPath : "/");
     return {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      "Accept": json ? "application/json" : "text/html",
-      "Referer": this.baseUrl + "/",
+      "Accept": json ? "application/json, text/plain, */*" : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+      "User-Agent": "Mozilla/5.0",
+      "Referer": ref,
       "Origin": this.baseUrl,
       "X-Requested-With": "XMLHttpRequest"
     };
@@ -62,66 +69,63 @@ class HiAnime {
       .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
   }
 
+  _stripTags(s) {
+    return String(s || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  }
+
   _norm(title) {
-    return String(title || "")
-      .toLowerCase()
-      .replace(/\(?\b(19|20)\d{2}\b\)?/g, "")
-      .replace(/\b(season|cour|part|uncensored|the animation|the movie|movie)\b/g, "")
-      .replace(/\d+(st|nd|rd|th)/g, m => m.replace(/st|nd|rd|th/, ""))
-      .replace(/(?<!i)ii(?!i)/g, "2")
-      .replace(/[^a-z0-9]+/g, "")
-      .trim();
+    let s = String(title || "").toLowerCase();
+    s = s.replace(/\b(season|cour|part|the|animation|movie|uncensored)\b/g, " ");
+    s = s.replace(/\b(\d+)(st|nd|rd|th)\b/g, (_, n) => n);
+    s = s.replace(/\biii\b/g, "3");
+    s = s.replace(/\bii\b/g, "2");
+    s = s.replace(/\biv\b/g, "4");
+    s = s.replace(/\bv\b/g, "5");
+    s = s.replace(/[^\w\s]/g, " ");
+    s = s.replace(/\s+/g, " ").trim();
+    return s;
   }
 
-  _normTitle(title) {
-    return String(title || "")
-      .toLowerCase()
-      .replace(/\b(season|cour|part|uncensored)\b/g, "")
-      .replace(/\d+(st|nd|rd|th)/g, m => m.replace(/st|nd|rd|th/, ""))
-      .replace(/[^a-z0-9]+/g, "");
-  }
-
-  _similarity(a, b) {
-    const [lenA, lenB] = [a.length, b.length];
-    if (!lenA || !lenB) return lenA === lenB ? 1 : 0;
-
-    const dp = Array(lenA + 1).fill(null).map(() => Array(lenB + 1).fill(0));
-    for (let i = 0; i <= lenA; i++) dp[i][0] = i;
-    for (let j = 0; j <= lenB; j++) dp[0][j] = j;
-
-    for (let i = 1; i <= lenA; i++) {
-      for (let j = 1; j <= lenB; j++) {
-        dp[i][j] = a[i - 1] === b[j - 1]
-          ? dp[i - 1][j - 1]
-          : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
-      }
-    }
-
-    return 1 - dp[lenA][lenB] / Math.max(lenA, lenB);
-  }
-
-  _parseDate(str) {
-    const m = String(str || "").match(/([A-Za-z]{3})\s+(\d+),\s*(\d{4})/);
-    if (!m) return null;
-    const months = { Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6, Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12 };
-    return { 
-      year: parseInt(m[3], 10), 
-      month: months[m[1]] || 0,
-      day: parseInt(m[2], 10) || 0
-    };
+  _looksLikeUrlOrId(s) {
+    const v = String(s || "").trim().toLowerCase();
+    if (!v) return false;
+    if (/^https?:\/\//i.test(v)) return true;
+    // common patterns where "query" is not a real title
+    if (v.includes("anilist.co/anime/")) return true;
+    if (v.includes("myanimelist.net/anime/")) return true;
+    if (/^\d+$/.test(v)) return true;
+    if (v.startsWith("anime/") || v.startsWith("manga/")) return true;
+    return false;
   }
 
   _extractId(input) {
-    const s = String(input || "");
-    const m = s.match(/(?:\/watch\/[^-]+-|-)(\d+)/);
-    return m ? m[1] : (/^\d+$/.test(s) ? s : "");
+    const s0 = String(input || "").trim();
+    if (!s0) return "";
+
+    let s = s0;
+    if (s.startsWith("http")) {
+      try {
+        const u = new URL(s);
+        s = (u.pathname || "") + (u.search || "");
+      } catch {}
+    }
+
+    s = s.replace(/[?#].*$/, "");
+
+    const m1 = s.match(/-(\d+)(?:\/|$)/);
+    if (m1) return m1[1];
+
+    const m2 = s.match(/\/(\d+)(?:\/|$)/);
+    if (m2) return m2[1];
+
+    return /^\d+$/.test(s0) ? s0 : "";
   }
 
   _parseArg(arg) {
     if (typeof arg === "string") {
       const s = arg.trim();
       try {
-        return s.startsWith("{") || s.startsWith("[") ? JSON.parse(s) : { query: s };
+        return (s.startsWith("{") || s.startsWith("[")) ? JSON.parse(s) : { query: s };
       } catch {
         return { query: s };
       }
@@ -130,308 +134,408 @@ class HiAnime {
   }
 
   _getTrack(obj) {
-    if (obj.dub === true) return "dub";
-    if (obj.dub === false) return "sub";
-    const t = String(obj.subOrDub || obj.track || "").toLowerCase();
+    if (obj && obj.dub === true) return "dub";
+    if (obj && obj.dub === false) return "sub";
+    const t = String((obj && (obj.subOrDub || obj.track)) || "").toLowerCase();
     return t === "dub" || t === "sub" ? t : "sub";
   }
 
-  _escapeRegex(str) {
-    return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
-  _searchSuggest(q, page = 1) {
-    const url = page === 1
-      ? `${this.baseUrl}/ajax/search/suggest?keyword=${encodeURIComponent(q)}`
-      : `${this.baseUrl}/ajax/search/suggest?keyword=${encodeURIComponent(q)}&page=${page}`;
-    
-    const data = this._json(url, this._headers());
-    const html = this._clean(String(data.html || data.result || ""));
-    
-    const re = /<a href="\/([^"]+)" class="nav-item">[\s\S]*?<h3 class="film-name"[^>]*data-jname="([^"]+)"[^>]*>([^<]+)<\/h3>[\s\S]*?<div class="film-infor">\s*<span>([^<]+)<\/span>\s*<i[^>]*><\/i>\s*([^<]+)\s*<i[^>]*><\/i>/g;
-    
-    const out = [];
-    let m;
-
-    while ((m = re.exec(html)) !== null) {
-      const path = m[1].trim();
-      if (path.startsWith("search?")) continue;
-
-      const jname = m[2]?.trim() || "";
-      const title = m[3]?.trim() || "";
-      const dateStr = m[4]?.trim() || "";
-      const format = m[5]?.trim().toUpperCase() || "";
-
-      const id = this._extractId(path);
-      if (!id) continue;
-
-      out.push({
-        id,
-        pageUrl: path,
-        title: this._clean(title),
-        jname: this._clean(jname),
-        normTitle: this._norm(title),
-        normTitleJP: this._norm(jname),
-        startDate: this._parseDate(dateStr),
-        format,
-        url: `${this.baseUrl}/${path}`
-      });
-    }
-
-    return out;
-  }
-
-  _searchFallback(q) {
-    const url = `${this.baseUrl}/search?keyword=${encodeURIComponent(q)}`;
-    const html = this._text(url, this._headers(false));
-    
-    const regex = /<a href="\/watch\/([^"]+)"[^>]+title="([^"]+)"[^>]+data-id="(\d+)"/g;
-    const out = [];
-    let m;
-
-    while ((m = regex.exec(html)) !== null) {
-      const pageUrl = m[1];
-      const title = m[2];
-      const id = m[3];
-
-      const jnameRegex = new RegExp(
-        `<h3 class="film-name">[\\s\\S]*?<a[^>]+href="\\/${this._escapeRegex(pageUrl)}[^"]*"[^>]+data-jname="([^"]+)"`,
-        "i"
+  _nativeFetch(url, method, headers, body) {
+    try {
+      const raw = Native.fetch(
+        String(url),
+        method ? String(method) : "GET",
+        JSON.stringify(headers || {}),
+        body == null ? "" : String(body)
       );
-      const jnameMatch = html.match(jnameRegex);
-      const jname = jnameMatch ? jnameMatch[1] : "";
-
-      out.push({
-        id,
-        pageUrl,
-        title: this._clean(title),
-        jname: this._clean(jname),
-        normTitle: this._normTitle(title),
-        normTitleJP: this._normTitle(jname),
-        url: `${this.baseUrl}/watch/${pageUrl}`
-      });
+      let j = {};
+      try { j = JSON.parse(raw || "{}"); } catch { j = {}; }
+      return {
+        ok: !!j.ok,
+        status: Number(j.status || 0),
+        headers: (j && j.headers) ? j.headers : {},
+        body: (j && j.body != null) ? String(j.body) : "",
+        error: (j && j.error) ? String(j.error) : "",
+        message: (j && j.message) ? String(j.message) : ""
+      };
+    } catch (e) {
+      return { ok: false, status: 0, headers: {}, body: "", error: "NATIVE_FETCH_FAIL", message: "" + e };
     }
-
-    return out;
   }
 
-  /**
-   * Check if a specific episode has dub available
-   */
-  _checkEpisodeHasDub(animeId, episodeId) {
-    const cacheKey = `${animeId}:${episodeId}`;
-    if (this._cache.serverCheck[cacheKey] !== undefined) {
-      return this._cache.serverCheck[cacheKey];
-    }
+  _fetchText(url, headers) {
+    const r = this._nativeFetch(url, "GET", headers || {}, "");
+    return String(r.body || "");
+  }
+
+  _fetchJson(url, headers) {
+    const r = this._nativeFetch(url, "GET", headers || {}, "");
+    const txt = String(r.body || "").replace(/^\uFEFF/, "").trim();
+    if (!txt) return {};
+
+    const looksHtml =
+      txt.startsWith("<!doctype") ||
+      txt.startsWith("<html") ||
+      txt.startsWith("<head") ||
+      txt.startsWith("<body") ||
+      txt.includes("<html") ||
+      txt.includes("<title");
 
     try {
-      const data = this._json(`${this.baseUrl}/ajax/v2/episode/servers?episodeId=${episodeId}`, this._headers());
-      const html = this._clean(String(data.html || data.result || ""));
-      const hasDub = /data-type="dub"/i.test(html);
-      this._cache.serverCheck[cacheKey] = hasDub;
-      return hasDub;
+      const obj = JSON.parse(txt);
+      return obj && typeof obj === "object" ? obj : {};
     } catch {
-      this._cache.serverCheck[cacheKey] = false;
+      if (looksHtml) return { html: txt };
+      return {};
+    }
+  }
+
+  _parseDateToObj(dateStr) {
+    const s = String(dateStr || "").trim();
+    if (!s) return null;
+
+    const monthMap = {
+      Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6,
+      Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12
+    };
+
+    const m = s.match(/([A-Za-z]{3})\s+(\d{1,2}),\s*(\d{4})/);
+    if (!m) return null;
+
+    const month = monthMap[m[1]] || 0;
+    const day = parseInt(m[2], 10) || 0;
+    const year = parseInt(m[3], 10) || 0;
+    if (!year) return null;
+
+    return { year, month, day };
+  }
+
+  _searchSuggest(q, maxItems = 25) {
+    const url = this.baseUrl + "/ajax/search/suggest?keyword=" + encodeURIComponent(q);
+    const data = this._fetchJson(url, this._headers(true, "/"));
+    const html = this._clean(String((data && data.html) || ""));
+    if (!html) return [];
+
+    const results = [];
+    const seen = new Set();
+
+    const aRe = /<a\b([^>]*?)>([\s\S]*?)<\/a>/gi;
+    let am;
+    while ((am = aRe.exec(html)) !== null) {
+      const attrs = am[1] || "";
+      const inner = am[2] || "";
+
+      const hrefM = attrs.match(/\bhref=(["'])(.*?)\1/i);
+      if (!hrefM) continue;
+
+      let href = String(hrefM[2] || "").trim();
+      if (!href) continue;
+
+      if (href.startsWith("http")) {
+        try {
+          const u = new URL(href);
+          href = (u.pathname || "") + (u.search || "");
+        } catch {}
+      }
+
+      href = href.replace(/[?#].*$/, "");
+      if (href.startsWith("/")) href = href.slice(1);
+
+      if (!href || href.startsWith("search?")) continue;
+
+      const isNavItem = /\bclass=(["'])[^\1]*\bnav-item\b[^\1]*\1/i.test(attrs) || /\bnav-item\b/i.test(attrs);
+      const looksLikeAnimePage = href.includes("/watch/") || /-\d+$/.test(href) || /\bwatch\b/.test(href);
+      if (!isNavItem && !looksLikeAnimePage) continue;
+
+      const id = this._extractId(href);
+      if (!id) continue;
+
+      let jname = "";
+      let title = "";
+
+      const jM = inner.match(/\bdata-jname=(["'])(.*?)\1/i);
+      if (jM) jname = this._clean(jM[2]);
+
+      const h3M = inner.match(/<h3[^>]*class=(["'])[^\1]*\bfilm-name\b[^\1]*\1[^>]*>([\s\S]*?)<\/h3>/i);
+      if (h3M) title = this._stripTags(this._clean(h3M[2]));
+
+      if (!title) {
+        const tAttr = inner.match(/\btitle=(["'])(.*?)\1/i);
+        if (tAttr) title = this._stripTags(this._clean(tAttr[2]));
+      }
+
+      if (!title) title = this._stripTags(this._clean(inner));
+      title = String(title || "").trim();
+      if (!title) continue;
+
+      let startDate = null;
+      const dateM = inner.match(/<span>\s*([A-Za-z]{3}\s+\d{1,2},\s*\d{4})\s*<\/span>/i);
+      if (dateM) startDate = this._parseDateToObj(dateM[1]);
+
+      const key = id + "|" + title.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      let finalPath = href;
+      if (!finalPath.startsWith("watch/") && !finalPath.includes("/watch/")) {
+        // leave as-is
+      } else {
+        finalPath = finalPath.replace(/^\/+/, "");
+      }
+
+      results.push({
+        id,
+        title,
+        jname,
+        normTitle: this._norm(title),
+        normTitleJP: this._norm(jname),
+        startDate,
+        url: this.baseUrl + "/" + finalPath
+      });
+
+      if (results.length >= maxItems) break;
+    }
+
+    if (!results.length) {
+      const hrefRe = /\bhref=(["'])(\/?[^"'#?]*-\d+)\1/gi;
+      let hm;
+      while ((hm = hrefRe.exec(html)) !== null) {
+        let path = String(hm[2] || "").trim();
+        if (!path) continue;
+        if (path.startsWith("/")) path = path.slice(1);
+
+        const id = this._extractId(path);
+        if (!id) continue;
+
+        const key = id + "|" + path.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        results.push({
+          id,
+          title: path,
+          jname: "",
+          normTitle: this._norm(path),
+          normTitleJP: "",
+          startDate: null,
+          url: this.baseUrl + "/" + path
+        });
+
+        if (results.length >= maxItems) break;
+      }
+    }
+
+    return results;
+  }
+
+  _searchHtmlPage(q, maxItems = 35) {
+    const url = this.baseUrl + "/search?keyword=" + encodeURIComponent(q);
+    const html0 = this._clean(this._fetchText(url, this._headers(false, "/search")));
+    if (!html0) return [];
+
+    const out = [];
+    const seen = new Set();
+
+    const re = /<a\s+href=(["'])\/watch\/([^"']+)\1[^>]*title=(["'])(.*?)\3[^>]*data-id=(["'])(\d+)\5/gi;
+    let m;
+    while ((m = re.exec(html0)) !== null) {
+      const pageUrl = "watch/" + String(m[2] || "").trim();
+      const title = this._clean(String(m[4] || "").trim());
+      const id = String(m[6] || "").trim();
+      if (!id || !title) continue;
+
+      const key = id + "|" + title.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      out.push({
+        id,
+        title,
+        jname: "",
+        normTitle: this._norm(title),
+        normTitleJP: "",
+        startDate: null,
+        url: this.baseUrl + "/" + pageUrl
+      });
+
+      if (out.length >= maxItems) break;
+    }
+
+    return out;
+  }
+
+  _checkDub(id) {
+    const animeId = this._extractId(id);
+    if (!animeId) return false;
+
+    const cached = this._cache.dub.get(animeId);
+    if (cached) return !!cached.v;
+
+    try {
+      const data = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/list/${animeId}`, this._headers(true, "/"));
+      const html = this._clean(String(data.html || ""));
+      if (!html) {
+        this._cache.dub.set(animeId, { v: false, t: Date.now() });
+        return false;
+      }
+
+      const episodeIds = [];
+      const reId = /data-id=(["'])(\d+)\1/g;
+      let m;
+      while ((m = reId.exec(html)) !== null) {
+        const epId = String(m[2] || "").trim();
+        if (epId) episodeIds.push(epId);
+        if (episodeIds.length >= 5) break;
+      }
+
+      if (!episodeIds.length) {
+        this._cache.dub.set(animeId, { v: false, t: Date.now() });
+        return false;
+      }
+
+      let dubCount = 0;
+
+      for (const epId of episodeIds) {
+        const cacheKey = `${animeId}:${epId}`;
+        const epCached = this._cache.serverCheck.get(cacheKey);
+        let hasDub;
+
+        if (epCached) {
+          hasDub = !!epCached.v;
+        } else {
+          const sData = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/servers?episodeId=${epId}`, this._headers(true, "/"));
+          hasDub = /data-type=(["'])dub\1/i.test(String(sData.html || ""));
+          this._cache.serverCheck.set(cacheKey, { v: hasDub, t: Date.now() });
+        }
+
+        if (hasDub) dubCount++;
+        if (dubCount >= 2) break;
+      }
+
+      const hasDubFinal = dubCount >= 2 || (dubCount > 0 && episodeIds.length <= 2);
+      this._cache.dub.set(animeId, { v: hasDubFinal, t: Date.now() });
+      return hasDubFinal;
+    } catch {
+      this._cache.dub.set(animeId, { v: false, t: Date.now() });
       return false;
     }
   }
 
-  /**
-   * Improved: Check more episodes and return percentage of episodes with dub
-   */
-  _checkDubAvailability(id) {
-    const animeId = this._extractId(id);
-    if (!animeId) return { hasDub: false, percentage: 0 };
-    
-    if (this._cache.dub[animeId] !== undefined) {
-      return this._cache.dub[animeId];
-    }
+  checkDubForEpisode(arg) {
+    arg = this._parseArg(arg);
+    const animeId = String(arg.animeId || "").split("/")[0];
+    const episodeNumber = parseFloat(arg.episodeNumber);
+
+    const numId = this._extractId(animeId);
+    if (!numId || !isFinite(episodeNumber)) return false;
 
     try {
-      const data = this._json(`${this.baseUrl}/ajax/v2/episode/list/${animeId}`, this._headers());
-      const html = this._clean(String(data.html || data.result || ""));
-      
-      // Extract all episode IDs
-      const episodeIds = [];
-      const re = /data-id="([^"]+)"/g;
+      const data = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/list/${numId}`, this._headers(true, "/"));
+      const html = this._clean(String(data.html || ""));
+      if (!html) return false;
+
+      const re = /<a[^>]*data-number=(["'])([^"']+)\1[^>]*data-id=(["'])(\d+)\3/gi;
       let m;
+      let targetEpId = null;
+
       while ((m = re.exec(html)) !== null) {
-        episodeIds.push(m[1]);
-      }
-
-      if (!episodeIds.length) {
-        const result = { hasDub: false, percentage: 0, total: 0, dubCount: 0 };
-        this._cache.dub[animeId] = result;
-        return result;
-      }
-
-      // Check first 10 episodes or all if less than 10
-      const toCheck = episodeIds.slice(0, Math.min(10, episodeIds.length));
-      let dubCount = 0;
-
-      for (const epId of toCheck) {
-        if (this._checkEpisodeHasDub(animeId, epId)) {
-          dubCount++;
+        const num = parseFloat(m[2]);
+        if (isFinite(num) && Math.abs(num - episodeNumber) < 0.0001) {
+          targetEpId = String(m[4] || "").trim();
+          break;
         }
       }
 
-      const percentage = (dubCount / toCheck.length) * 100;
-      const result = {
-        hasDub: dubCount > 0,
-        percentage,
-        total: toCheck.length,
-        dubCount
-      };
+      if (!targetEpId) return false;
 
-      this._cache.dub[animeId] = result;
-      return result;
+      const cacheKey = `${numId}:${targetEpId}`;
+      const cached = this._cache.serverCheck.get(cacheKey);
+      if (cached) return !!cached.v;
 
+      const sData = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/servers?episodeId=${targetEpId}`, this._headers(true, "/"));
+      const hasDub = /data-type=(["'])dub\1/i.test(String(sData.html || ""));
+
+      this._cache.serverCheck.set(cacheKey, { v: hasDub, t: Date.now() });
+      return hasDub;
     } catch {
-      const result = { hasDub: false, percentage: 0, total: 0, dubCount: 0 };
-      this._cache.dub[animeId] = result;
-      return result;
+      return false;
     }
-  }
-
-  /**
-   * Legacy method for backwards compatibility
-   */
-  _checkDub(id) {
-    const result = this._checkDubAvailability(id);
-    // Consider it has dub if at least 50% of checked episodes have dub
-    return result.hasDub && result.percentage >= 50;
   }
 
   search(arg) {
+    this._cleanCache();
+
     arg = this._parseArg(arg);
-    const q = String(arg.query || arg.q || "").trim();
-    if (!q) return JSON.stringify([]);
+
+    // media might come in as a string in some bridges
+    let media = arg.media || {};
+    if (typeof media === "string") {
+      try { media = JSON.parse(media); } catch { media = {}; }
+    }
+
+    // If query is a URL/ID, use media title as actual keyword
+    let qRaw = String(arg.query || "").trim();
+    const mediaTitle = String(media.englishTitle || media.romajiTitle || "").trim();
+    const q = (this._looksLikeUrlOrId(qRaw) && mediaTitle) ? mediaTitle : qRaw;
+
+    if (!q) return [];
 
     const track = this._getTrack(arg);
-    const media = arg.media || {};
-    const start = media.startDate || {};
+    const start = (media && media.startDate) ? media.startDate : {};
     const targetYear = parseInt(start.year, 10) || 0;
-    const targetMonth = parseInt(start.month, 10) || 0;
 
-    const en = String(media.englishTitle || media.english || "").trim();
-    const ro = String(media.romajiTitle || media.romaji || "").trim();
-    const format = String(media.format || "").trim().toUpperCase();
-    
-    const normEn = this._norm(en);
-    const normRo = this._norm(ro);
-    const targetNormJP = normRo || normEn;
-    const targetNorm = normEn || normRo || this._norm(q);
+    const normTarget = this._norm(media.englishTitle || media.romajiTitle || q);
+    const normTargetJP = this._norm(media.romajiTitle || "");
 
-    const cacheKey = `${q}|${track}|${targetYear}|${targetMonth}|${format}`;
-    if (this._cache.search[cacheKey]) return JSON.stringify(this._cache.search[cacheKey]);
+    const cacheKey = `${q}|${track}|${targetYear}`;
+    const cached = this._cache.search.get(cacheKey);
+    if (cached) return cached.v;
 
-    let filtered = [];
+    let items = this._searchSuggest(q, 35);
+    if (!items.length) items = this._searchHtmlPage(q, 45);
+    if (!items.length) return [];
 
-    // Use fallback search if no date info
-    if (!targetYear) {
-      let items = this._searchFallback(q);
-      if (!items.length) return JSON.stringify([]);
+    items = items.filter(x => {
+      const nt = x.normTitle || "";
+      const nj = x.normTitleJP || "";
+      const titleMatch =
+        nt === normTarget ||
+        (normTargetJP && nj === normTargetJP) ||
+        nt.includes(normTarget) ||
+        normTarget.includes(nt) ||
+        (normTargetJP && (nj.includes(normTargetJP) || normTargetJP.includes(nj)));
 
-      const normQuery = this._normTitle(q);
-      items = items.filter(x => {
-        return x.normTitle === normQuery ||
-               x.normTitleJP === normQuery ||
-               x.normTitle.includes(normQuery) ||
-               x.normTitleJP.includes(normQuery) ||
-               normQuery.includes(x.normTitle) ||
-               normQuery.includes(x.normTitleJP);
-      });
+      const yearMatch = !targetYear || !x.startDate || x.startDate.year === targetYear;
+      return titleMatch && yearMatch;
+    });
 
-      items.sort((a, b) => {
-        const diff = a.normTitle.length - b.normTitle.length;
-        return diff !== 0 ? diff : a.normTitle.localeCompare(b.normTitle);
-      });
-
-      filtered = items;
-
-      // IMPORTANT: Check dub for fallback search too!
-      if (track === "dub") {
-        filtered = filtered.slice(0, 12).filter(x => {
-          const dubInfo = this._checkDubAvailability(x.id);
-          // Require at least 70% of episodes to have dub
-          return dubInfo.hasDub && dubInfo.percentage >= 70;
-        });
-        if (!filtered.length) return JSON.stringify([]);
-      }
-
-      const results = filtered.map(x => ({
-        id: `${x.id}/${track}`,
-        title: x.title,
-        url: x.url,
-        subOrDub: track
-      }));
-
-      this._cache.search[cacheKey] = results;
-      return JSON.stringify(results);
+    if (!items.length) {
+      items = this._searchSuggest(q, 35);
+      if (!items.length) items = this._searchHtmlPage(q, 45);
     }
 
-    // Multi-page search with date matching
-    const exactTitle = x => x.normTitle === targetNorm || x.normTitleJP === targetNormJP;
-    const looseTitle = x => 
-      this._similarity(x.normTitle, targetNorm) > 0.8 ||
-      this._similarity(x.normTitleJP, targetNormJP) > 0.8;
-    const looserTitle = x =>
-      x.normTitle.includes(targetNorm) ||
-      x.normTitleJP.includes(targetNormJP) ||
-      targetNorm.includes(x.normTitle) ||
-      targetNormJP.includes(x.normTitleJP) ||
-      this._similarity(x.normTitle, targetNorm) > 0.6 ||
-      this._similarity(x.normTitleJP, targetNormJP) > 0.6;
+    items.sort((a, b) => {
+      const yearA = (a.startDate && a.startDate.year) || 0;
+      const yearB = (b.startDate && b.startDate.year) || 0;
 
-    const dateYM = x =>
-      x.startDate && x.startDate.year === targetYear && x.startDate.month === targetMonth;
-    const dateY = x =>
-      x.startDate && x.startDate.year === targetYear;
-    const exactFormat = x => format && x.format === format;
-
-    const matchTiers = [
-      x => exactTitle(x) && dateYM(x) && exactFormat(x),
-      x => exactTitle(x) && dateY(x) && exactFormat(x),
-      x => looseTitle(x) && dateYM(x) && exactFormat(x),
-      x => looseTitle(x) && dateY(x) && exactFormat(x),
-      x => exactTitle(x) && dateYM(x),
-      x => exactTitle(x) && dateY(x),
-      x => looseTitle(x) && dateYM(x),
-      x => looseTitle(x) && dateY(x)
-    ];
-
-    for (let page = 1; page <= 7; page++) {
-      const pageMatches = this._searchSuggest(q, page);
-      if (!pageMatches.length) break;
-
-      const hasLoose = pageMatches.some(looserTitle);
-      if (!hasLoose) break;
-
-      for (const tier of matchTiers) {
-        filtered = pageMatches.filter(tier);
-        if (filtered.length) break;
+      if (targetYear && yearA && yearB) {
+        const diffA = Math.abs(yearA - targetYear);
+        const diffB = Math.abs(yearB - targetYear);
+        if (diffA !== diffB) return diffA - diffB;
       }
-
-      if (filtered.length) break;
-    }
-
-    if (!filtered.length) return JSON.stringify([]);
-
-    filtered.sort((a, b) => {
-      const diff = a.normTitle.length - b.normTitle.length;
-      return diff !== 0 ? diff : a.normTitle.localeCompare(b.normTitle);
+      return (a.normTitle || "").length - (b.normTitle || "").length;
     });
 
     if (track === "dub") {
-      filtered = filtered.slice(0, 12).filter(x => {
-        const dubInfo = this._checkDubAvailability(x.id);
-        // Require at least 70% of checked episodes to have dub
-        return dubInfo.hasDub && dubInfo.percentage >= 70;
-      });
-      if (!filtered.length) return JSON.stringify([]);
+      const top = items.slice(0, 12);
+      const ok = [];
+      for (const x of top) {
+        if (this._checkDub(x.id)) ok.push(x);
+      }
+      items = ok.length ? ok : top;
     }
 
-    const results = filtered.map(x => ({
+    const results = items.map(x => ({
       id: `${x.id}/${track}`,
       title: x.title,
       url: x.url,
@@ -439,131 +543,122 @@ class HiAnime {
       startDate: x.startDate
     }));
 
-    this._cache.search[cacheKey] = results;
-    return JSON.stringify(results);
+    this._cache.search.set(cacheKey, { v: results, t: Date.now() });
+    return results;
   }
 
-  findEpisodes(animeId) {
-    const [id, track] = String(animeId || "").split("/");
+  findEpisodes(Id) {
+    const [id, trackRaw] = String(Id || "").split("/");
+    const track = trackRaw === "dub" ? "dub" : "sub";
     const numId = this._extractId(id);
-    if (!numId) return JSON.stringify([]);
+    if (!numId) return [];
 
-    const actualTrack = track && (track === "dub" || track === "sub") ? track : "sub";
+    const data = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/list/${numId}`, this._headers(true, "/"));
+    const html = this._clean(String(data.html || ""));
+    if (!html) return [];
 
-    const data = this._json(`${this.baseUrl}/ajax/v2/episode/list/${numId}`, this._headers());
-    const html = this._clean(String(data.html || data.result || ""));
-    
-    const re = /<a[^>]*class="[^"]*\bep-item\b[^"]*"[^>]*data-number="([^"]+)"[^>]*data-id="([^"]+)"[^>]*href="([^"]+)"[\s\S]*?<div class="ep-name[^"]*"[^>]*title="([^"]+)"/g;
     const episodes = [];
-    let m;
+    const re = /<a[^>]*class=(["'])[^\1]*\bep-item\b[^\1]*\1[^>]*data-number=(["'])([^"']+)\2[^>]*data-id=(["'])(\d+)\4[^>]*href=(["'])([^"']+)\6[\s\S]*?<div class=(["'])[^\8]*\bep-name\b[^\8]*\8[^>]*title=(["'])([^"']*)\9/gi;
 
+    let m;
     while ((m = re.exec(html)) !== null) {
-      const num = parseFloat(m[1]);
-      const epId = m[2].trim();
-      const epTitle = this._clean(m[4]) || "";
-      
-      if (epId && isFinite(num)) {
-        episodes.push({
-          id: `${epId}/${actualTrack}`,
-          number: num,
-          title: epTitle,
-          url: `${this.baseUrl}${m[3]}`
-        });
-      }
+      const num = parseFloat(m[3]);
+      const epId = String(m[5] || "").trim();
+      const href = String(m[7] || "").trim();
+      const title = this._clean(m[10]);
+
+      if (!epId || !isFinite(num)) continue;
+
+      episodes.push({
+        id: `${epId}/${track}`,
+        number: num,
+        title: title || `Episode ${num}`,
+        url: href ? (href.startsWith("http") ? href : `${this.baseUrl}${href}`) : ""
+      });
     }
 
     episodes.sort((a, b) => a.number - b.number);
-    return JSON.stringify(episodes);
+    return episodes;
   }
 
   findEpisodeServer(episodeObj, serverName) {
-    let ep = typeof episodeObj === "string" ? JSON.parse(episodeObj) : episodeObj;
-    const epIdRaw = String(ep.id || "").trim();
-    if (!epIdRaw) throw new Error("Missing episode id");
-
-    const [epId, trackFromId] = epIdRaw.split("/");
-    
-    let track = trackFromId && (trackFromId === "dub" || trackFromId === "sub") 
-      ? trackFromId 
-      : this._getTrack(ep);
-    
-    if (track !== "dub" && track !== "sub") track = "sub";
-
-    const allowedTypes = track === "dub" ? ["dub"] : ["sub", "raw"];
-    const typePattern = allowedTypes.join("|");
-    const requestedServer = (serverName || "HD-1").trim();
-    const escapedServer = this._escapeRegex(requestedServer);
-
-    const data = this._json(`${this.baseUrl}/ajax/v2/episode/servers?episodeId=${epId}`, this._headers());
-    const html = this._clean(String(data.html || data.result || ""));
-    
-    const trackAvailable = new RegExp(`data-type="${track}"`, "i").test(html);
-    
-    if (!trackAvailable) {
-      if (track === "dub") {
-        throw new Error(`Dub not available for this episode. Try switching to sub.`);
-      }
-      throw new Error(`No ${track} servers found for this episode`);
+    let ep = episodeObj;
+    if (typeof episodeObj === "string") {
+      try { ep = JSON.parse(episodeObj); } catch { ep = {}; }
     }
-    
-    const regex = new RegExp(
-      `<div[^>]*class="item server-item"[^>]*data-type="(${typePattern})"[^>]*data-id="(\\d+)"[^>]*>\\s*<a[^>]*>\\s*${escapedServer}\\s*</a>`,
+
+    const [epId, trackRaw] = String(ep.id || "").split("/");
+    if (!epId) throw new Error("Missing episode id");
+
+    const actualTrack = trackRaw === "dub" ? "dub" : "sub";
+    const server = String(serverName || "HD-1").trim() || "HD-1";
+
+    const data = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/servers?episodeId=${epId}`, this._headers(true, "/"));
+    const html = this._clean(String(data.html || ""));
+
+    if (!html || !/data-type=(["'])(sub|dub|raw)\1/i.test(html)) {
+      throw new Error("No servers found");
+    }
+
+    const safeServer = this._escapeRegExp(server);
+
+    let serverId = "";
+    const blockRe = new RegExp(
+      `data-type=(["'])${actualTrack}\\1[\\s\\S]*?data-id=(["'])(\\d+)\\2[\\s\\S]*?<a[^>]*>\\s*${safeServer}\\s*<\\/a>`,
       "i"
     );
+    let m = blockRe.exec(html);
 
-    const match = regex.exec(html);
-    
-    if (!match) {
-      const fallbackRegex = new RegExp(
-        `<div[^>]*class="item server-item"[^>]*data-type="(${typePattern})"[^>]*data-id="(\\d+)"`,
-        "i"
-      );
-      const fallbackMatch = fallbackRegex.exec(html);
-      
-      if (!fallbackMatch) {
-        throw new Error(`No ${track} servers found for this episode`);
-      }
-      
-      const serverId = fallbackMatch[2];
-      const sources = this._json(`${this.baseUrl}/ajax/v2/episode/sources?id=${serverId}`, this._headers());
-      const embed = String(sources.link || "");
-      if (!embed) throw new Error("No embed link");
-
-      return this._buildStreamResponse(embed, requestedServer);
+    if (!m) {
+      const fb = new RegExp(`data-type=(["'])${actualTrack}\\1[^>]*data-id=(["'])(\\d+)\\2`, "i");
+      m = fb.exec(html);
+      if (m) serverId = m[3];
+    } else {
+      serverId = m[3];
     }
 
-    const serverId = match[2];
-    const sources = this._json(`${this.baseUrl}/ajax/v2/episode/sources?id=${serverId}`, this._headers());
+    if (!serverId) throw new Error(`No ${actualTrack} server found`);
+
+    const sources = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/sources?id=${serverId}`, this._headers(true, "/"));
     const embed = String(sources.link || "");
     if (!embed) throw new Error("No embed link");
 
-    return this._buildStreamResponse(embed, requestedServer);
+    return this._buildStreamResponse(embed, server);
   }
 
   _buildStreamResponse(embed, serverName) {
-    let decrypt = null;
-    let headers = {};
+    let decrypt, headers;
 
     try {
       decrypt = this._extractMega(embed);
       headers = decrypt.headers || {};
-    } catch {
-      const fb = this._json(`https://ac-api.ofchaos.com/api/anime/embed/convert/v2?embedUrl=${encodeURIComponent(embed)}`, {});
-      decrypt = fb;
-      const u = new URL(embed);
-      headers = {
-        "Referer": `${u.protocol}//${u.host}/`,
-        "Origin": `${u.protocol}//${u.host}`,
-        "User-Agent": "Mozilla/5.0"
-      };
+    } catch (e) {
+      try {
+        const fb = this._fetchJson(
+          `https://ac-api.ofchaos.com/api/anime/embed/convert/v2?embedUrl=${encodeURIComponent(embed)}`,
+          {}
+        );
+        decrypt = fb || {};
+        const u = new URL(embed);
+        headers = {
+          "Referer": `${u.protocol}//${u.host}/`,
+          "Origin": `${u.protocol}//${u.host}`,
+          "User-Agent": "Mozilla/5.0"
+        };
+      } catch (e2) {
+        throw new Error("Failed to extract stream: " + e.message);
+      }
     }
 
     const srcs = Array.isArray(decrypt.sources) ? decrypt.sources : [];
-    const stream = srcs.find(s => s && s.type === "hls") || srcs.find(s => s && s.file);
-    if (!stream || !stream.file) throw new Error("No stream found");
+    const stream =
+      srcs.find(s => s && s.type === "hls" && s.file) ||
+      srcs.find(s => s && s.file);
+
+    if (!stream || !stream.file) throw new Error("No stream file found");
 
     const subs = (Array.isArray(decrypt.tracks) ? decrypt.tracks : [])
-      .filter(t => t && String(t.kind || "").toLowerCase() === "captions" && t.file)
+      .filter(t => t && t.kind === "captions" && t.file)
       .map((t, i) => ({
         id: `sub-${i}`,
         language: t.label || "Unknown",
@@ -571,20 +666,20 @@ class HiAnime {
         isDefault: !!t.default
       }));
 
-    return JSON.stringify({
+    return {
       server: serverName,
-      headers,
+      headers: headers || {},
       intro: decrypt.intro || null,
       outro: decrypt.outro || null,
       videoSources: [{
         url: stream.file,
-        type: String(stream.type || "").toLowerCase() === "hls" ? "m3u8" : "mp4",
+        type: stream.type === "hls" ? "m3u8" : "mp4",
         quality: "auto",
         subtitles: subs,
         intro: decrypt.intro || null,
         outro: decrypt.outro || null
       }]
-    });
+    };
   }
 
   _extractMega(url) {
@@ -595,22 +690,24 @@ class HiAnime {
       "X-Requested-With": "XMLHttpRequest",
       "Referer": base,
       "Origin": `${u.protocol}//${u.host}`,
-      "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
+      "User-Agent": "Mozilla/5.0"
     };
 
-    const html = this._text(url, headers);
-    const idM = html.match(/<title>\s*File\s+#([a-zA-Z0-9]+)/i);
+    const html = this._fetchText(url, headers);
+
+    const idM = html.match(/<title>\s*File\s*#([a-zA-Z0-9]+)/i);
     if (!idM) throw new Error("File ID not found");
-    const fileId = idM[1];
 
     let nonce = (html.match(/\b[a-zA-Z0-9]{48}\b/) || [])[0];
+
     if (!nonce) {
       const parts = [...html.matchAll(/["']([A-Za-z0-9]{16})["']/g)];
       if (parts.length >= 3) nonce = parts[0][1] + parts[1][1] + parts[2][1];
     }
     if (!nonce) throw new Error("Nonce not found");
 
-    const data = this._json(`${base}embed-2/v3/e-1/getSources?id=${fileId}&_k=${nonce}`, headers);
+    const data = this._fetchJson(`${base}embed-2/v3/e-1/getSources?id=${idM[1]}&_k=${nonce}`, headers);
+
     return {
       sources: data.sources || [],
       tracks: data.tracks || [],
