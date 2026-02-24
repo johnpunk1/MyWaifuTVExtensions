@@ -1,7 +1,7 @@
 class HiAnime {
   constructor() {
     this.type = "anime-streaming";
-    this.version = "3.0.5";
+    this.version = "3.0.6";
     this.baseUrl = "https://hianime.to";
     this._cache = {
       dub: new Map(),
@@ -579,11 +579,82 @@ class HiAnime {
       }
 
       if (addedThisPage === 0) break;
-
     }
 
     episodes.sort((a, b) => a.number - b.number);
     return episodes;
+  }
+
+  _normalizeServerName(name) {
+    return String(name || "")
+      .trim()
+      .replace(/\u2013|\u2014/g, "-")
+      .replace(/\s+/g, "-")
+      .toUpperCase();
+  }
+
+  _uniq(arr) {
+    const out = [];
+    const seen = new Set();
+    for (const x of arr || []) {
+      const k = this._normalizeServerName(x);
+      if (!k) continue;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(k);
+    }
+    return out;
+  }
+
+  _parseServersForTrack(html, track) {
+    const t = track === "dub" ? "dub" : "sub";
+    const src = String(html || "");
+    if (!src) return [];
+
+    const blocks = [];
+
+    const sectionRe = new RegExp(`data-type=(["'])${t}\\1[\\s\\S]*?<\\/div>\\s*<\\/div>`, "i");
+    const sectionM = sectionRe.exec(src);
+    const section = sectionM ? sectionM[0] : src;
+
+    const itemRe = /<li\b[^>]*\bdata-id=(["'])(\d+)\1[^>]*>[\s\S]*?<a\b[^>]*>([\s\S]*?)<\/a>[\s\S]*?<\/li>/gi;
+    let m;
+    while ((m = itemRe.exec(section)) !== null) {
+      const id = String(m[2] || "").trim();
+      const label = this._stripTags(this._clean(m[3] || ""));
+      const name = this._normalizeServerName(label);
+      if (!id || !name) continue;
+      blocks.push({ name, id });
+    }
+
+    if (!blocks.length) {
+      const liRe = /<li\b[^>]*\bdata-id=(["'])(\d+)\1[^>]*>[\s\S]*?<\/li>/gi;
+      let lm;
+      while ((lm = liRe.exec(section)) !== null) {
+        const li = lm[0] || "";
+        const id = String(lm[2] || "").trim();
+
+        const aM = li.match(/<a\b[^>]*>([\s\S]*?)<\/a>/i);
+        const label = aM ? this._stripTags(this._clean(aM[1] || "")) : "";
+        const name = this._normalizeServerName(label);
+
+        if (!id || !name) continue;
+        blocks.push({ name, id });
+      }
+    }
+
+    const uniqByName = new Map();
+    for (const b of blocks) {
+      if (!uniqByName.has(b.name)) uniqByName.set(b.name, b.id);
+    }
+
+    return [...uniqByName.entries()].map(([name, id]) => ({ name, id }));
+  }
+
+  _looksPlayable(resp) {
+    const vs = resp && resp.videoSources;
+    if (!Array.isArray(vs) || !vs.length) return false;
+    return vs.some(v => v && typeof v.url === "string" && v.url.length > 10);
   }
 
   findEpisodeServer(episodeObj, serverName) {
@@ -596,7 +667,7 @@ class HiAnime {
     if (!epId) throw new Error("Missing episode id");
 
     const actualTrack = trackRaw === "dub" ? "dub" : "sub";
-    const server = String(serverName || "HD-1").trim() || "HD-1";
+    const preferred = this._normalizeServerName(serverName || "HD-1") || "HD-1";
 
     const data = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/servers?episodeId=${epId}`, this._headers(true, "/"));
     const html = this._clean(String(data.html || ""));
@@ -605,30 +676,45 @@ class HiAnime {
       throw new Error("No servers found");
     }
 
-    const safeServer = this._escapeRegExp(server);
+    const parsed = this._parseServersForTrack(html, actualTrack);
+    const availableNames = parsed.map(x => x.name);
 
-    let serverId = "";
-    const blockRe = new RegExp(
-      `data-type=(["'])${actualTrack}\\1[\\s\\S]*?data-id=(["'])(\\d+)\\2[\\s\\S]*?<a[^>]*>\\s*${safeServer}\\s*<\\/a>`,
-      "i"
-    );
-    let m = blockRe.exec(html);
+    const settings = this.getSettings() || {};
+    const settingsServers = Array.isArray(settings.episodeServers) ? settings.episodeServers : [];
 
-    if (!m) {
-      const fb = new RegExp(`data-type=(["'])${actualTrack}\\1[^>]*data-id=(["'])(\\d+)\\2`, "i");
-      m = fb.exec(html);
-      if (m) serverId = m[3];
-    } else {
-      serverId = m[3];
+    const attemptOrder = this._uniq([
+      preferred,
+      ...availableNames,
+      ...settingsServers,
+      "HD-1",
+      "HD-2",
+      "HD-3"
+    ]);
+
+    const idByName = new Map(parsed.map(x => [x.name, x.id]));
+
+    let lastErr = null;
+
+    for (const srv of attemptOrder) {
+      const serverId = idByName.get(srv) || "";
+      if (!serverId) continue;
+
+      try {
+        const sources = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/sources?id=${serverId}`, this._headers(true, "/"));
+        const embed = String(sources.link || "");
+        if (!embed) throw new Error("No embed link");
+
+        const resp = this._buildStreamResponse(embed, srv);
+        if (this._looksPlayable(resp)) return resp;
+
+        throw new Error("No playable sources");
+      } catch (e) {
+        lastErr = e;
+        continue;
+      }
     }
 
-    if (!serverId) throw new Error(`No ${actualTrack} server found`);
-
-    const sources = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/sources?id=${serverId}`, this._headers(true, "/"));
-    const embed = String(sources.link || "");
-    if (!embed) throw new Error("No embed link");
-
-    return this._buildStreamResponse(embed, server);
+    throw new Error(`No playable ${actualTrack} server found` + (lastErr && lastErr.message ? `: ${lastErr.message}` : ""));
   }
 
   _buildStreamResponse(embed, serverName) {
