@@ -1,768 +1,414 @@
 class HiAnime {
   constructor() {
-    this.type = "anime-streaming";
-    this.version = "3.0.9";
     this.baseUrl = "https://hianime.to";
-    this._cache = {
-      dub: new Map(),
-      search: new Map(),
-      serverCheck: new Map(),
-      _maxSize: 200,
-      _expiry: 5 * 60 * 1000
-    };
+    this._cache = {};
+    this._cacheMaxAge = 1000 * 60 * 5;
   }
 
-  getSettings() {
+  getMetaData() {
     return {
-      episodeServers: ["HD-1", "HD-2", "HD-3"],
-      supportsSub: true,
+      id: "hianime",
+      name: "HiAnime",
+      version: "3.1.0",
+      author: "Fixed",
+      description: "Streams from HiAnime.to with fallback API",
+      url: this.baseUrl,
       supportsDub: true,
-      supportsHls: true
+      settings: {
+        episodeServers: ["HD-1", "HD-2", "HD-3"]
+      }
     };
   }
 
-  stream() { return null; }
-
-  _log(msg) {
-    try {
-      console.log("[HiAnime] " + msg);
-    } catch (e) {}
-  }
-
-  _cleanCache() {
-    const now = Date.now();
-    for (const [name, cache] of Object.entries(this._cache)) {
-      if (!(cache instanceof Map)) continue;
-
-      const sizeBefore = cache.size;
-
-      if (cache.size > this._cache._maxSize) {
-        const entries = [...cache.entries()];
-        entries.sort((a, b) => (b[1]?.t || 0) - (a[1]?.t || 0));
-        const keep = entries.slice(0, Math.floor(this._cache._maxSize * 0.7));
-        cache.clear();
-        for (const [k, v] of keep) cache.set(k, v);
+  _nativeFetch(url, options, retries = 2) {
+    return fetch(url, options).catch(err => {
+      if (retries > 0) {
+        console.log(`Fetch failed for ${url}, retrying... (${retries} left)`);
+        return new Promise(resolve => setTimeout(resolve, 500))
+          .then(() => this._nativeFetch(url, options, retries - 1));
       }
-
-      for (const [k, v] of cache) {
-        if (v && v.t && now - v.t > this._cache._expiry) cache.delete(k);
-      }
-
-      if (sizeBefore > this._cache._maxSize * 0.9 && cache.size < sizeBefore) {
-        this._log(`Cache '${name}' cleaned: ${sizeBefore} -> ${cache.size} items`);
-      }
-    }
-  }
-
-  _escapeRegExp(s) {
-    return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-
-  _headers(json = true, refererPath = "/") {
-    const ref = this.baseUrl + (refererPath && String(refererPath).startsWith("/") ? refererPath : "/");
-    return {
-      "Accept": json ? "application/json, text/plain, */*" : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-      "User-Agent": "Mozilla/5.0",
-      "Referer": ref,
-      "Origin": this.baseUrl,
-      "X-Requested-With": "XMLHttpRequest"
-    };
-  }
-
-  _clean(str) {
-    return String(str || "")
-      .replace(/\\u0026/g, "&")
-      .replace(/&(?:amp|#38);/g, "&")
-      .replace(/&quot;/g, '"')
-      .replace(/&(?:#39|apos);/g, "'")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
-  }
-
-  _stripTags(s) {
-    return String(s || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-  }
-
-  _norm(title) {
-    let s = String(title || "").toLowerCase();
-    s = s.replace(/\b(season|cour|part|the|animation|movie|uncensored)\b/g, " ");
-    s = s.replace(/\b(\d+)(st|nd|rd|th)\b/g, (_, n) => n);
-    s = s.replace(/\biii\b/g, "3");
-    s = s.replace(/\bii\b/g, "2");
-    s = s.replace(/\biv\b/g, "4");
-    s = s.replace(/\bv\b/g, "5");
-    s = s.replace(/[^\w\s]/g, " ");
-    s = s.replace(/\s+/g, " ").trim();
-    return s;
-  }
-
-  _extractId(input) {
-    const s0 = String(input || "").trim();
-    if (!s0) return "";
-
-    let s = s0;
-    if (s.startsWith("http")) {
-      try {
-        const u = new URL(s);
-        s = (u.pathname || "") + (u.search || "");
-      } catch {}
-    }
-
-    s = s.replace(/[?#].*$/, "");
-
-    const m1 = s.match(/-(\d+)(?:\/|$)/);
-    if (m1) return m1[1];
-
-    const m2 = s.match(/\/(\d+)(?:\/|$)/);
-    if (m2) return m2[1];
-
-    return /^\d+$/.test(s0) ? s0 : "";
-  }
-
-  _parseArg(arg) {
-    if (typeof arg === "string") {
-      const s = arg.trim();
-      try {
-        return (s.startsWith("{") || s.startsWith("[")) ? JSON.parse(s) : { query: s };
-      } catch {
-        return { query: s };
-      }
-    }
-    return arg || {};
-  }
-
-  _getTrack(obj) {
-    if (obj && obj.dub === true) return "dub";
-    if (obj && obj.dub === false) return "sub";
-    const t = String((obj && (obj.subOrDub || obj.track)) || "").toLowerCase();
-    return t === "dub" || t === "sub" ? t : "sub";
-  }
-
-  _nativeFetch(url, method, headers, body, retries = 2) {
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        const raw = Native.fetch(
-          String(url),
-          method ? String(method) : "GET",
-          JSON.stringify(headers || {}),
-          body == null ? "" : String(body)
-        );
-        let j = {};
-        try { j = JSON.parse(raw || "{}"); } catch { j = {}; }
-        
-        const result = {
-          ok: !!j.ok,
-          status: Number(j.status || 0),
-          headers: (j && j.headers) ? j.headers : {},
-          body: (j && j.body != null) ? String(j.body) : "",
-          error: (j && j.error) ? String(j.error) : "",
-          message: (j && j.message) ? String(j.message) : ""
-        };
-
-        if (result.ok || attempt === retries) {
-          return result;
-        }
-      } catch (e) {
-        if (attempt === retries) {
-          return { ok: false, status: 0, headers: {}, body: "", error: "NATIVE_FETCH_FAIL", message: "" + e };
-        }
-      }
-    }
-    return { ok: false, status: 0, headers: {}, body: "", error: "NATIVE_FETCH_FAIL", message: "Max retries exceeded" };
-  }
-
-  _fetchText(url, headers) {
-    const r = this._nativeFetch(url, "GET", headers || {}, "");
-    return String(r.body || "");
-  }
-
-  _fetchJson(url, headers) {
-    const r = this._nativeFetch(url, "GET", headers || {}, "");
-    const txt = String(r.body || "").replace(/^\uFEFF/, "").trim();
-    if (!txt) return {};
-
-    const looksHtml =
-      txt.startsWith("<!doctype") ||
-      txt.startsWith("<html") ||
-      txt.startsWith("<head") ||
-      txt.startsWith("<body") ||
-      txt.includes("<html") ||
-      txt.includes("<title");
-
-    try {
-      const obj = JSON.parse(txt);
-      return obj && typeof obj === "object" ? obj : {};
-    } catch {
-      if (looksHtml) return { html: txt };
-      return {};
-    }
-  }
-
-  _parseDateToObj(dateStr) {
-    const s = String(dateStr || "").trim();
-    if (!s) return null;
-
-    const monthMap = {
-      Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6,
-      Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12
-    };
-
-    const m = s.match(/([A-Za-z]{3})\s+(\d{1,2}),\s*(\d{4})/);
-    if (!m) return null;
-
-    const month = monthMap[m[1]] || 0;
-    const day = parseInt(m[2], 10) || 0;
-    const year = parseInt(m[3], 10) || 0;
-    if (!year) return null;
-
-    return { year, month, day };
-  }
-
-  _searchSuggest(q, maxItems = 25) {
-    const url = this.baseUrl + "/ajax/search/suggest?keyword=" + encodeURIComponent(q);
-    const data = this._fetchJson(url, this._headers(true, "/"));
-    const html = this._clean(String((data && data.html) || ""));
-    if (!html) return [];
-
-    const results = [];
-    const seen = new Set();
-
-    const aRe = /<a\b([^>]*?)>([\s\S]*?)<\/a>/gi;
-    let am;
-    while ((am = aRe.exec(html)) !== null) {
-      const attrs = am[1] || "";
-      const inner = am[2] || "";
-
-      const hrefM = attrs.match(/\bhref=["']([^"']+)["']/i);
-      if (!hrefM) continue;
-
-      let href = String(hrefM[1] || "").trim();
-      if (!href) continue;
-
-      if (href.startsWith("http")) {
-        try {
-          const u = new URL(href);
-          href = (u.pathname || "") + (u.search || "");
-        } catch {}
-      }
-
-      href = href.replace(/[?#].*$/, "");
-      if (href.startsWith("/")) href = href.slice(1);
-
-      if (!href || href.startsWith("search?")) continue;
-
-      const isNavItem = /\bclass=["'][^"']*\bnav-item\b/i.test(attrs);
-      const looksLikeAnimePage = href.includes("/watch/") || /-\d+$/.test(href);
-      if (!isNavItem && !looksLikeAnimePage) continue;
-
-      const id = this._extractId(href);
-      if (!id) continue;
-
-      let jname = "";
-      let title = "";
-
-      const jM = inner.match(/\bdata-jname=["']([^"']+)["']/i);
-      if (jM) jname = this._clean(jM[1]);
-
-      const h3M = inner.match(/<h3[^>]*\bfilm-name\b[^>]*>([\s\S]*?)<\/h3>/i);
-      if (h3M) title = this._stripTags(this._clean(h3M[1]));
-
-      if (!title) {
-        const tAttr = inner.match(/\btitle=["']([^"']+)["']/i);
-        if (tAttr) title = this._stripTags(this._clean(tAttr[1]));
-      }
-
-      if (!title) title = this._stripTags(this._clean(inner));
-      title = String(title || "").trim();
-      if (!title) continue;
-
-      let startDate = null;
-      const dateM = inner.match(/<span>\s*([A-Za-z]{3}\s+\d{1,2},\s*\d{4})\s*<\/span>/i);
-      if (dateM) startDate = this._parseDateToObj(dateM[1]);
-
-      const key = id + "|" + title.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      let finalPath = href;
-      finalPath = finalPath.replace(/^\/+/, "");
-
-      results.push({
-        id,
-        title,
-        jname,
-        normTitle: this._norm(title),
-        normTitleJP: this._norm(jname),
-        startDate,
-        url: this.baseUrl + "/" + finalPath
-      });
-
-      if (results.length >= maxItems) break;
-    }
-
-    return results;
-  }
-
-  _searchHtmlPage(q, maxItems = 35) {
-    const url = this.baseUrl + "/search?keyword=" + encodeURIComponent(q);
-    const html0 = this._clean(this._fetchText(url, this._headers(false, "/search")));
-    if (!html0) return [];
-
-    const out = [];
-    const seen = new Set();
-
-    const re = /<a\s+href=["']\/watch\/([^"']+)["'][^>]*title=["']([^"']+)["'][^>]*data-id=["'](\d+)["']/gi;
-    let m;
-    while ((m = re.exec(html0)) !== null) {
-      const pageUrl = "watch/" + String(m[1] || "").trim();
-      const title = this._clean(String(m[2] || "").trim());
-      const id = String(m[3] || "").trim();
-      if (!id || !title) continue;
-
-      const key = id + "|" + title.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      out.push({
-        id,
-        title,
-        jname: "",
-        normTitle: this._norm(title),
-        normTitleJP: "",
-        startDate: null,
-        url: this.baseUrl + "/" + pageUrl
-      });
-
-      if (out.length >= maxItems) break;
-    }
-
-    return out;
-  }
-
-  _checkDub(id) {
-    const animeId = this._extractId(id);
-    if (!animeId) return false;
-
-    const cached = this._cache.dub.get(animeId);
-    if (cached) return !!cached.v;
-
-    try {
-      const data = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/list/${animeId}`, this._headers(true, "/"));
-      const html = this._clean(String(data.html || ""));
-      if (!html) {
-        this._cache.dub.set(animeId, { v: false, t: Date.now() });
-        return false;
-      }
-
-      const episodeIds = [];
-      const reId = /data-id=["'](\d+)["']/g;
-      let m;
-      while ((m = reId.exec(html)) !== null) {
-        const epId = String(m[1] || "").trim();
-        if (epId) episodeIds.push(epId);
-        if (episodeIds.length >= 5) break;
-      }
-
-      if (!episodeIds.length) {
-        this._cache.dub.set(animeId, { v: false, t: Date.now() });
-        return false;
-      }
-
-      let dubCount = 0;
-
-      for (const epId of episodeIds) {
-        const cacheKey = `${animeId}:${epId}`;
-        const epCached = this._cache.serverCheck.get(cacheKey);
-        let hasDub;
-
-        if (epCached) {
-          hasDub = !!epCached.v;
-        } else {
-          const sData = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/servers?episodeId=${epId}`, this._headers(true, "/"));
-          hasDub = /data-type=["']dub["']/i.test(String(sData.html || ""));
-          this._cache.serverCheck.set(cacheKey, { v: hasDub, t: Date.now() });
-        }
-
-        if (hasDub) dubCount++;
-        if (dubCount >= 2) break;
-      }
-
-      const hasDubFinal = dubCount >= 2 || (dubCount > 0 && episodeIds.length <= 2);
-      this._cache.dub.set(animeId, { v: hasDubFinal, t: Date.now() });
-      return hasDubFinal;
-    } catch {
-      this._cache.dub.set(animeId, { v: false, t: Date.now() });
-      return false;
-    }
-  }
-
-  checkDubForEpisode(arg) {
-    arg = this._parseArg(arg);
-    const animeId = String(arg.animeId || "").split("/")[0];
-    const episodeNumber = parseFloat(arg.episodeNumber);
-
-    const numId = this._extractId(animeId);
-    if (!numId || !isFinite(episodeNumber)) return false;
-
-    try {
-      const data = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/list/${numId}`, this._headers(true, "/"));
-      const html = this._clean(String(data.html || ""));
-      if (!html) return false;
-
-      const re = /<a[^>]*data-number=["']([^"']+)["'][^>]*data-id=["'](\d+)["']/gi;
-      let m;
-      let targetEpId = null;
-
-      while ((m = re.exec(html)) !== null) {
-        const num = parseFloat(m[1]);
-        if (isFinite(num) && Math.abs(num - episodeNumber) < 0.0001) {
-          targetEpId = String(m[2] || "").trim();
-          break;
-        }
-      }
-
-      if (!targetEpId) return false;
-
-      const cacheKey = `${numId}:${targetEpId}`;
-      const cached = this._cache.serverCheck.get(cacheKey);
-      if (cached) return !!cached.v;
-
-      const sData = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/servers?episodeId=${targetEpId}`, this._headers(true, "/"));
-      const hasDub = /data-type=["']dub["']/i.test(String(sData.html || ""));
-
-      this._cache.serverCheck.set(cacheKey, { v: hasDub, t: Date.now() });
-      return hasDub;
-    } catch {
-      return false;
-    }
-  }
-
-  search(arg) {
-    this._cleanCache();
-
-    arg = this._parseArg(arg);
-    const q = String(arg.query || "").trim();
-    if (!q) return [];
-
-    const track = this._getTrack(arg);
-    const media = arg.media || {};
-    const start = media.startDate || {};
-    const targetYear = parseInt(start.year, 10) || 0;
-    const targetFormat = String(media.format || "").toUpperCase().trim();
-
-    const normTarget = this._norm(media.englishTitle || media.romajiTitle || q);
-    const normTargetJP = this._norm(media.romajiTitle || "");
-
-    const cacheKey = `${q}|${track}|${targetYear}|${targetFormat}`;
-    const cached = this._cache.search.get(cacheKey);
-    if (cached) return cached.v;
-
-    let items = this._searchSuggest(q, 35);
-    if (!items.length) items = this._searchHtmlPage(q, 45);
-    if (!items.length) return [];
-
-    items = items.filter(x => {
-      const nt = x.normTitle || "";
-      const nj = x.normTitleJP || "";
-      const titleMatch =
-        nt === normTarget ||
-        (normTargetJP && nj === normTargetJP) ||
-        nt.includes(normTarget) ||
-        normTarget.includes(nt) ||
-        (normTargetJP && (nj.includes(normTargetJP) || normTargetJP.includes(nj)));
-
-      const yearMatch = !targetYear || !x.startDate || x.startDate.year === targetYear;
-      
-      let formatMatch = true;
-      if (targetFormat === "MOVIE") {
-        const titleLower = x.title.toLowerCase();
-        formatMatch = titleLower.includes("movie") || 
-                     titleLower.includes("film") ||
-                     /\bmovie\b/.test(titleLower);
-      } else if (targetFormat === "TV") {
-        const titleLower = x.title.toLowerCase();
-        formatMatch = !titleLower.includes("movie") && 
-                     !titleLower.includes("film");
-      } else if (targetFormat === "OVA") {
-        const titleLower = x.title.toLowerCase();
-        formatMatch = /\bova\b/i.test(titleLower);
-      } else if (targetFormat === "ONA") {
-        const titleLower = x.title.toLowerCase();
-        formatMatch = /\bona\b/i.test(titleLower);
-      } else if (targetFormat === "SPECIAL") {
-        const titleLower = x.title.toLowerCase();
-        formatMatch = /\bspecial\b/i.test(titleLower);
-      }
-
-      return titleMatch && yearMatch && formatMatch;
+      throw err;
     });
+  }
 
-    if (!items.length) {
-      items = this._searchSuggest(q, 35);
-      if (!items.length) items = this._searchHtmlPage(q, 45);
+  _getCached(key) {
+    const item = this._cache[key];
+    if (!item) return null;
+    if (Date.now() - item.timestamp > this._cacheMaxAge) {
+      delete this._cache[key];
+      return null;
+    }
+    return item.data;
+  }
+
+  _setCache(key, data) {
+    this._cache[key] = { data, timestamp: Date.now() };
+  }
+
+  async search(query) {
+    const normalize = (title) => {
+      return (title || "")
+        .toLowerCase()
+        .replace(/(season|cour|part|the animation|the movie|movie)/g, "")
+        .replace(/\d+(st|nd|rd|th)/g, (m) => m.replace(/st|nd|rd|th/, ""))
+        .replace(/[^a-z0-9]+/g, "")
+        .replace(/(?<!i)ii(?!i)/g, "2");
+    };
+
+    const normalizeTitle = (title) => {
+      return (title || "")
+        .toLowerCase()
+        .replace(/(season|cour|part|uncensored)/g, "")
+        .replace(/\d+(st|nd|rd|th)/g, (m) => m.replace(/st|nd|rd|th/, ""))
+        .replace(/[^a-z0-9]+/g, "");
+    };
+
+    const decodeHtmlEntities = (str) => {
+      return (str || "")
+        .replace(/\\u0026/g, "&")
+        .replace(/&#(\d+);?/g, (m, dec) => String.fromCharCode(dec))
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">");
+    };
+
+    const levenshteinSimilarity = (a, b) => {
+      const lenA = a.length;
+      const lenB = b.length;
+      const dp = Array.from({ length: lenA + 1 }, () => new Array(lenB + 1).fill(0));
+
+      for (let i = 0; i <= lenA; i++) dp[i][0] = i;
+      for (let j = 0; j <= lenB; j++) dp[0][j] = j;
+
+      for (let i = 1; i <= lenA; i++) {
+        for (let j = 1; j <= lenB; j++) {
+          if (a[i - 1] === b[j - 1]) dp[i][j] = dp[i - 1][j - 1];
+          else dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+        }
+      }
+
+      const distance = dp[lenA][lenB];
+      const maxLen = Math.max(lenA, lenB);
+      return 1 - distance / maxLen;
+    };
+
+    const start = query.media.startDate;
+    const targetNormJP = normalize(query.media.romajiTitle);
+    const targetNorm = query.media.englishTitle ? normalize(query.media.englishTitle) : targetNormJP;
+
+    const fetchMatches = async (url) => {
+      const reply = await this._nativeFetch(url).then(r => r.json());
+      const html = reply.html;
+
+      const regex = /<a href="\/([^"]+)" class="nav-item">[\s\S]*?<h3 class="film-name"[^>]*data-jname="([^"]+)"[^>]*>([^<]+)<\/h3>[\s\S]*?<div class="film-infor">\s*<span>([^<]+)<\/span>\s*<i[^>]*><\/i>\s*([^<]+)\s*<i[^>]*><\/i>/g;
+
+      const monthMap = {
+        Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6,
+        Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12,
+      };
+
+      const matches = [...html.matchAll(regex)]
+        .map(m => {
+          const pageUrl = m[1];
+          if (pageUrl.startsWith("search?")) return null;
+
+          const jname = m[2]?.trim();
+          const title = m[3]?.trim();
+          const dateStr = m[4].trim();
+          const format = m[5].trim().toUpperCase();
+
+          let startDate = { year: 0, month: 0, day: 0 };
+          const dateMatch = dateStr.match(/([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})/);
+          if (dateMatch) {
+            const month = monthMap[dateMatch[1]];
+            const day = parseInt(dateMatch[2]);
+            const year = parseInt(dateMatch[3]);
+            startDate = { year, month, day };
+          }
+
+          const idMatch = pageUrl.match(/-(\d+)$/);
+          const id = idMatch ? idMatch[1] : pageUrl;
+
+          return {
+            id,
+            pageUrl,
+            title: decodeHtmlEntities(title),
+            normTitleJP: normalize(decodeHtmlEntities(jname)),
+            normTitle: normalize(decodeHtmlEntities(title)),
+            startDate,
+            format,
+          };
+        })
+        .filter(Boolean);
+
+      return matches;
+    };
+
+    const url = `${this.baseUrl}/ajax/search/suggest?keyword=${encodeURIComponent(query.query)}`;
+    const matches = await fetchMatches(url);
+
+    if (matches.length === 0) return [];
+
+    const exactTitle = (m) => m.normTitle === targetNorm || m.normTitleJP === targetNormJP;
+    const looseTitle = (m) =>
+      levenshteinSimilarity(m.normTitle, targetNorm) > 0.8 ||
+      levenshteinSimilarity(m.normTitleJP, targetNormJP) > 0.8;
+    const looserTitle = (m) =>
+      m.normTitle.includes(targetNorm) ||
+      m.normTitleJP.includes(targetNormJP) ||
+      targetNorm.includes(m.normTitle) ||
+      targetNormJP.includes(m.normTitleJP) ||
+      levenshteinSimilarity(m.normTitle, targetNorm) > 0.6 ||
+      levenshteinSimilarity(m.normTitleJP, targetNormJP) > 0.6;
+    const dateYM = (m) =>
+      m.startDate?.year === start?.year &&
+      m.startDate?.month === start?.month;
+    const dateY = (m) => m.startDate?.year === start?.year;
+    const exactFormat = (m) => m.format === query.media.format.toUpperCase();
+
+    const matchTiers = [
+      (m) => exactTitle(m) && dateYM(m) && exactFormat(m),
+      (m) => exactTitle(m) && dateY(m) && exactFormat(m),
+      (m) => looseTitle(m) && dateYM(m) && exactFormat(m),
+      (m) => looseTitle(m) && dateY(m) && exactFormat(m),
+    ];
+
+    let filtered = [];
+
+    for (let page = 1; page <= 7; page++) {
+      const pageUrl = page === 1 ? url : `${url}&page=${page}`;
+      const pageMatches = await fetchMatches(pageUrl);
+
+      if (!pageMatches.length) break;
+
+      const hasLoose = pageMatches.some(looserTitle);
+      if (!hasLoose) break;
+
+      for (const tier of matchTiers) {
+        filtered = pageMatches.filter(tier);
+        if (filtered.length) break;
+      }
+
+      if (filtered.length) break;
     }
 
-    items.sort((a, b) => {
-      const aTitle = a.title.toLowerCase();
-      const bTitle = b.title.toLowerCase();
-      
-      if (targetFormat === "MOVIE") {
-        const aIsMovie = aTitle.includes("movie");
-        const bIsMovie = bTitle.includes("movie");
-        if (aIsMovie && !bIsMovie) return -1;
-        if (!aIsMovie && bIsMovie) return 1;
-      } else if (targetFormat === "OVA") {
-        const aIsOVA = /\bova\b/i.test(aTitle);
-        const bIsOVA = /\bova\b/i.test(bTitle);
-        if (aIsOVA && !bIsOVA) return -1;
-        if (!aIsOVA && bIsOVA) return 1;
-      } else if (targetFormat === "ONA") {
-        const aIsONA = /\bona\b/i.test(aTitle);
-        const bIsONA = /\bona\b/i.test(bTitle);
-        if (aIsONA && !bIsONA) return -1;
-        if (!aIsONA && bIsONA) return 1;
-      } else if (targetFormat === "SPECIAL") {
-        const aIsSpecial = /\bspecial\b/i.test(aTitle);
-        const bIsSpecial = /\bspecial\b/i.test(bTitle);
-        if (aIsSpecial && !bIsSpecial) return -1;
-        if (!aIsSpecial && bIsSpecial) return 1;
-      }
-
-      const yearA = (a.startDate && a.startDate.year) || 0;
-      const yearB = (b.startDate && b.startDate.year) || 0;
-
-      if (targetYear && yearA && yearB) {
-        const diffA = Math.abs(yearA - targetYear);
-        const diffB = Math.abs(yearB - targetYear);
-        if (diffA !== diffB) return diffA - diffB;
-      }
-      return (a.normTitle || "").length - (b.normTitle || "").length;
-    });
-
-    if (track === "dub") {
-      const top = items.slice(0, 12);
-      const ok = [];
-      for (const x of top) {
-        if (this._checkDub(x.id)) ok.push(x);
-      }
-      items = ok.length ? ok : top;
-    }
-
-    const results = items.map(x => ({
-      id: `${x.id}/${track}`,
-      title: x.title,
-      url: x.url,
-      subOrDub: track,
-      startDate: x.startDate
+    let results = filtered.map(m => ({
+      id: `${m.id}/${query.dub ? "dub" : "sub"}`,
+      title: m.title,
+      url: `${this.baseUrl}/${m.pageUrl}`,
+      subOrDub: query.dub ? "dub" : "sub",
     }));
 
-    this._cache.search.set(cacheKey, { v: results, t: Date.now() });
+    if (!query.media.startDate || !query.media.startDate.year) {
+      const fetchMatches2 = async (url) => {
+        const html = await this._nativeFetch(url).then(res => res.text());
+        const regex = /<a href="\/watch\/([^"]+)"[^>]+title="([^"]+)"[^>]+data-id="(\d+)"/g;
+        return [...html.matchAll(regex)].map(m => {
+          const id = m[3];
+          const pageUrl = m[1];
+          const title = m[2];
+          const jnameRegex = new RegExp(
+            `<h3 class="film-name">[\\s\\S]*?<a[^>]+href="\\/${pageUrl}[^"]*"[^>]+data-jname="([^"]+)"`,
+            "i"
+          );
+          const jnameMatch = html.match(jnameRegex);
+          const jname = jnameMatch ? jnameMatch[1] : null;
+          return {
+            id,
+            pageUrl,
+            title: decodeHtmlEntities(title),
+            normTitleJP: normalizeTitle(decodeHtmlEntities(jname)),
+            normTitle: normalizeTitle(decodeHtmlEntities(title)),
+          };
+        });
+      };
+
+      const url2 = `${this.baseUrl}/search?keyword=${encodeURIComponent(query.query)}`;
+      const matches2 = await fetchMatches2(url2);
+
+      filtered = matches2.filter(m => {
+        const titleMatch =
+          m.normTitle === normalizeTitle(query.query) ||
+          m.normTitleJP === normalizeTitle(query.query) ||
+          m.normTitle.includes(normalizeTitle(query.query)) ||
+          m.normTitleJP.includes(normalizeTitle(query.query)) ||
+          normalizeTitle(query.query).includes(m.normTitle) ||
+          normalizeTitle(query.query).includes(m.normTitleJP);
+        return titleMatch;
+      });
+
+      filtered.sort((a, b) => {
+        const A = normalizeTitle(a.title);
+        const B = normalizeTitle(b.title);
+        if (A.length !== B.length) return A.length - B.length;
+        return A.localeCompare(B);
+      });
+
+      results = filtered.map(m => ({
+        id: `${m.id}/${query.dub ? "dub" : "sub"}`,
+        title: m.title,
+        url: `${this.baseUrl}/${m.pageUrl}`,
+        subOrDub: query.dub ? "dub" : "sub",
+      }));
+    }
+
     return results;
   }
 
-  findEpisodes(Id) {
-    const [id, trackRaw] = String(Id || "").split("/");
-    const track = trackRaw === "dub" ? "dub" : "sub";
-    const numId = this._extractId(id);
-    if (!numId) return [];
+  async getEpisodes(animeId) {
+    const [id, subOrDub] = animeId.split("/");
+    const cacheKey = `episodes-${id}`;
+    const cached = this._getCached(cacheKey);
+    if (cached) return cached.filter(ep => ep.id.endsWith(`/${subOrDub}`));
 
-    const data = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/list/${numId}`, this._headers(true, "/"));
-    const html = this._clean(String(data.html || ""));
-    if (!html) return [];
+    const res = await this._nativeFetch(`${this.baseUrl}/ajax/v2/episode/list/${id}`, {
+      headers: { "X-Requested-With": "XMLHttpRequest" }
+    });
+    const json = await res.json();
+    const html = json.html;
 
     const episodes = [];
-    const re = /<a[^>]*\bep-item\b[^>]*data-number=["']([^"']+)["'][^>]*data-id=["'](\d+)["'][^>]*href=["']([^"']+)["'][^>]*>[\s\S]*?<div[^>]*\bep-name\b[^>]*title=["']([^"']*)["']/gi;
+    const regex = /<a[^>]*class="[^"]*\bep-item\b[^"]*"[^>]*data-number="(\d+)"[^>]*data-id="(\d+)"[^>]*href="([^"]+)"[\s\S]*?<div class="ep-name[^"]*"[^>]*title="([^"]+)"/g;
 
-    let m;
-    while ((m = re.exec(html)) !== null) {
-      const num = parseFloat(m[1]);
-      const epId = String(m[2] || "").trim();
-      const href = String(m[3] || "").trim();
-      const title = this._clean(m[4]);
-
-      if (!epId || !isFinite(num)) continue;
-
+    let match;
+    while ((match = regex.exec(html)) !== null) {
       episodes.push({
-        id: `${epId}/${track}`,
-        number: num,
-        title: title || `Episode ${num}`,
-        url: href ? (href.startsWith("http") ? href : `${this.baseUrl}${href}`) : ""
+        id: `${match[2]}/sub`,
+        number: parseInt(match[1], 10),
+        url: this.baseUrl + match[3],
+        title: match[4],
+      });
+      episodes.push({
+        id: `${match[2]}/dub`,
+        number: parseInt(match[1], 10),
+        url: this.baseUrl + match[3],
+        title: match[4],
       });
     }
 
-    episodes.sort((a, b) => a.number - b.number);
-    return episodes;
+    this._setCache(cacheKey, episodes);
+    return episodes.filter(ep => ep.id.endsWith(`/${subOrDub}`));
   }
 
-  findEpisodeServer(episodeObj, serverName) {
-    let ep = episodeObj;
-    if (typeof episodeObj === "string") {
-      try { ep = JSON.parse(episodeObj); } catch { ep = {}; }
-    }
+  async getStreamingLinks(episodeId, server = "default") {
+    const [id, subOrDub] = episodeId.split("/");
+    const allowedTypes = subOrDub === "sub" ? ["sub", "raw"] : [subOrDub];
+    const typePattern = allowedTypes.join("|");
+    let serverName = server !== "default" ? server : "HD-1";
 
-    const epIdRaw = String(ep.id || "");
-    const [epId, trackRaw] = epIdRaw.split("/");
-    
-    if (!epId) throw new Error(`Missing episode id (got: '${epIdRaw}')`);
+    const serverJson = await this._nativeFetch(
+      `${this.baseUrl}/ajax/v2/episode/servers?episodeId=${id}`,
+      { headers: { "X-Requested-With": "XMLHttpRequest" } }
+    ).then(res => res.json());
 
-    const actualTrack = trackRaw === "dub" ? "dub" : "sub";
-    const server = String(serverName || "HD-1").trim() || "HD-1";
+    const serverHtml = serverJson.html;
+    const regex = new RegExp(
+      `<div[^>]*class="item server-item"[^>]*data-type="(${typePattern})"[^>]*data-id="(\\d+)"[^>]*>\\s*<a[^>]*>\\s*${serverName}\\s*</a>`,
+      "i"
+    );
 
-    try {
-      const serversUrl = `${this.baseUrl}/ajax/v2/episode/servers?episodeId=${epId}`;
-      const data = this._fetchJson(serversUrl, this._headers(true, "/"));
-      const html = this._clean(String(data.html || ""));
+    const match = regex.exec(serverHtml);
+    if (!match) throw new Error(`Server "${serverName}" (${allowedTypes.join("/")}) not found`);
 
-      if (!html) throw new Error("No servers found - empty HTML");
+    const serverId = match[2];
 
-      let serverId = "";
-      const safeServer = this._escapeRegExp(server);
-      const detailPattern = `data-type=["']${actualTrack}["'][\\s\\S]{0,500}?data-id=["'](\\d+)["'][\\s\\S]{0,200}?${safeServer}`;
-      const blockRe = new RegExp(detailPattern, "i");
-      let m = blockRe.exec(html);
-      
-      if (m) {
-        serverId = m[1];
-      } else {
-        const simplePattern = `data-type=["']${actualTrack}["'][^>]{0,200}?data-id=["'](\\d+)["']`;
-        const fb = new RegExp(simplePattern, "i");
-        m = fb.exec(html);
-        if (m) serverId = m[1];
-      }
+    const sourcesJson = await this._nativeFetch(
+      `${this.baseUrl}/ajax/v2/episode/sources?id=${serverId}`,
+      { headers: { "X-Requested-With": "XMLHttpRequest" } }
+    ).then(res => res.json());
 
-      if (!serverId) throw new Error(`No ${actualTrack} server found for episode ${epId}`);
-
-      const sourcesUrl = `${this.baseUrl}/ajax/v2/episode/sources?id=${serverId}`;
-      const sources = this._fetchJson(sourcesUrl, this._headers(true, "/"));
-      const embed = String(sources.link || "");
-      
-      if (!embed) throw new Error("No embed link in sources response");
-
-      return this._buildStreamResponse(embed, server);
-    } catch (e) {
-      throw new Error(`findEpisodeServer failed (ep=${epId}, track=${actualTrack}): ${e.message}`);
-    }
-  }
-
-  _buildStreamResponse(embed, serverName) {
-    let decrypt = null;
-    let headers = {};
-    let usedFallback = false;
+    let decryptData = null;
 
     try {
-      decrypt = this._extractMega(embed);
-      headers = decrypt.headers || {};
-    } catch (e) {
-      try {
-        const fbUrl = "https://ac-api.ofchaos.com/api/anime/embed/convert/v2?embedUrl=" + encodeURIComponent(embed);
-        const fb = this._fetchJson(fbUrl, {});
-        decrypt = fb || {};
-        usedFallback = true;
-        const u = new URL(embed);
-        headers = {
-          "Referer": u.protocol + "//" + u.host + "/",
-          "Origin": u.protocol + "//" + u.host,
-          "User-Agent": "Mozilla/5.0"
-        };
-      } catch (e2) {
-        throw new Error(`Stream extraction failed: ${e.message}`);
-      }
+      decryptData = await this._extractMegaCloud(sourcesJson.link);
+    } catch (err) {
+      console.warn("Primary decrypter failed:", err);
     }
 
-    if (!decrypt || typeof decrypt !== "object") {
-      throw new Error("Invalid decryption response");
+    if (!decryptData) {
+      console.warn("Primary decrypter failed — trying fallback API...");
+      const fallbackRes = await this._nativeFetch(
+        `https://ac-api.ofchaos.com/api/anime/embed/convert/v2?embedUrl=${encodeURIComponent(sourcesJson.link)}`
+      );
+      decryptData = await fallbackRes.json();
     }
 
-    const srcs = Array.isArray(decrypt.sources) ? decrypt.sources : [];
-    let stream = srcs.find(s => s && s.type === "hls" && s.file) || srcs.find(s => s && s.file);
+    const streamSource =
+      decryptData.sources.find(s => s.type === "hls") ||
+      decryptData.sources.find(s => s.type === "mp4");
 
-    if (!stream && usedFallback && decrypt.url) {
-      stream = { file: decrypt.url, type: "hls" };
-    }
+    if (!streamSource?.file) throw new Error("No valid stream file found");
 
-    if (!stream || !stream.file) {
-      throw new Error("No video source in response");
-    }
-
-    const subs = Array.isArray(decrypt.tracks) 
-      ? decrypt.tracks.filter(t => t && (t.kind === "captions" || t.kind === "subtitles")) 
-      : [];
-
-    const subtitles = subs.map((t, i) => ({
-      id: t.label || `sub_${i}`,
-      language: t.label || "Unknown",
-      url: t.file || "",
-      isDefault: !!t.default
-    })).filter(s => s.url);
-
-    const intro = decrypt.intro && typeof decrypt.intro === "object" ? {
-      start: Number(decrypt.intro.start || 0),
-      end: Number(decrypt.intro.end || 0)
-    } : null;
-
-    const outro = decrypt.outro && typeof decrypt.outro === "object" ? {
-      start: Number(decrypt.outro.start || 0),
-      end: Number(decrypt.outro.end || 0)
-    } : null;
+    const subtitles = (decryptData.tracks || [])
+      .filter(t => t.kind === "captions")
+      .map((track, index) => ({
+        id: `sub-${index}`,
+        language: track.label || "Unknown",
+        url: track.file,
+        isDefault: !!track.default,
+      }));
 
     return {
       server: serverName,
-      headers: headers,
-      intro: intro,
-      outro: outro,
-      videoSources: [{
-        url: stream.file,
-        type: stream.type || "hls",
-        quality: "auto"
-      }],
-      subtitles: subtitles
+      headers: {
+        "Referer": "https://megacloud.club/",
+        "Origin": "https://megacloud.club",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0",
+      },
+      sources: [
+        {
+          file: streamSource.file,
+          type: streamSource.type === "hls" ? "m3u8" : "mp4",
+          quality: "auto",
+        }
+      ],
+      subtitles
     };
   }
 
-  _extractMega(url) {
-    const u = new URL(url);
-    const base = u.protocol + "//" + u.host + "/";
-    
-    const html = this._fetchText(url.split("?")[0], {
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "User-Agent": "Mozilla/5.0",
-      "Referer": base
-    });
+  async _extractMegaCloud(embedUrl) {
+    const url = new URL(embedUrl);
+    const baseDomain = `${url.protocol}//${url.host}/`;
 
-    const fileIdMatch = url.match(/\/e(?:-\d+)?\/([a-zA-Z0-9_-]+)/);
-    const fileId = fileIdMatch ? fileIdMatch[1] : null;
-    if (!fileId) throw new Error("Could not extract file ID from URL");
-
-    let nonce = null;
-    const nonce48 = html.match(/player\s*=\s*{[^}]*_next\s*:\s*function\s*\([^)]*\)\s*{\s*return\s*["']([a-zA-Z0-9]{48})["']/);
-    if (nonce48) {
-      nonce = nonce48[1];
-    } else {
-      const nonce16 = html.match(/cid\s*=\s*["']([a-zA-Z0-9]{16})["']/);
-      if (nonce16) nonce = nonce16[1];
-    }
-
-    if (!nonce) throw new Error("Could not extract nonce from embed page");
-
-    const sourcesUrl = base + "embed-2/v3/e-1/getSources?id=" + fileId + "&_k=" + nonce;
-    const data = this._fetchJson(sourcesUrl, {
+    const headers = {
       "Accept": "*/*",
       "X-Requested-With": "XMLHttpRequest",
-      "Referer": base,
-      "User-Agent": "Mozilla/5.0"
-    });
-
-    data.headers = {
-      "Accept": "*/*",
-      "X-Requested-With": "XMLHttpRequest",
-      "Referer": base,
-      "Origin": base.replace(/\/$/, ""),
-      "User-Agent": "Mozilla/5.0"
+      "Referer": baseDomain,
+      "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
     };
 
-    return data;
+    const html = await this._nativeFetch(embedUrl, { headers }).then(r => r.text());
+
+    const fileIdMatch = html.match(/<title>\s*File\s+#([a-zA-Z0-9]+)\s*-/i);
+    if (!fileIdMatch) throw new Error("file_id not found in embed page");
+    const fileId = fileIdMatch[1];
+
+    let nonce = null;
+    const match48 = html.match(/\b[a-zA-Z0-9]{48}\b/);
+    if (match48) {
+      nonce = match48[0];
+    } else {
+      const match3x16 = [...html.matchAll(/["']([A-Za-z0-9]{16})["']/g)];
+      if (match3x16.length >= 3) {
+        nonce = match3x16[0][1] + match3x16[1][1] + match3x16[2][1];
+      }
+    }
+    if (!nonce) throw new Error("nonce not found");
+
+    const sourcesJson = await this._nativeFetch(
+      `${baseDomain}embed-2/v3/e-1/getSources?id=${fileId}&_k=${nonce}`,
+      { headers }
+    ).then(r => r.json());
+
+    return {
+      sources: sourcesJson.sources,
+      tracks: sourcesJson.tracks || [],
+      intro: sourcesJson.intro || null,
+      outro: sourcesJson.outro || null,
+      server: sourcesJson.server || null,
+    };
   }
 }
 
