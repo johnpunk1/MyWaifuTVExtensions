@@ -4,16 +4,15 @@ class HiAnime {
     this.version = "3.1.0";
     this.baseUrl = "https://hianime.to";
     this._cache = {
-      dub:     new Map(),
+      dub:     new Map(), 
       dubEp:   new Map(), 
-      search:  new Map(),
+      search:  new Map(), 
       episodes:new Map(), 
       servers: new Map(), 
       _maxSize: 300,
       _ttl: 8 * 60 * 1000
     };
   }
-
 
   getSettings() {
     return {
@@ -36,6 +35,7 @@ class HiAnime {
 
   _cacheSet(map, key, value) {
     if (map.size >= this._cache._maxSize) {
+      // Evict oldest 30 %
       const entries = [...map.entries()].sort((a, b) => a[1].t - b[1].t);
       const evict = Math.ceil(entries.length * 0.3);
       for (let i = 0; i < evict; i++) map.delete(entries[i][0]);
@@ -354,6 +354,7 @@ class HiAnime {
     return episodes;
   }
 
+
   checkDubForEpisode(arg) {
     arg = this._parseArg(arg);
     const numId = this._extractId(String(arg.animeId || "").split("/")[0]);
@@ -364,6 +365,7 @@ class HiAnime {
       const data = this._fetchJson(`${this.baseUrl}/ajax/v2/episode/list/${numId}`, this._headers(true, "/"));
       const html = this._clean(String((data && data.html) || ""));
       if (!html) return false;
+
       const re = /<a[^>]*data-number=(["'])([^"']+)\1[^>]*data-id=(["'])(\d+)\3/gi;
       let m, targetEpId = null;
       while ((m = re.exec(html)) !== null) {
@@ -384,40 +386,52 @@ class HiAnime {
     }
   }
 
-
   _parseServersForTrack(html, track) {
     const t = track === "dub" ? "dub" : "sub";
     const src = String(html || "");
     if (!src) return [];
-
-    const sectionRe = new RegExp(`data-type=(["'])${t}\\1[\\s\\S]*?(?=data-type=|$)`, "i");
-    const sectionM = sectionRe.exec(src);
-    const section = sectionM ? sectionM[0] : src;
-
     const blocks = [];
-    const itemRe = /<li\b[^>]*\bdata-id=(["'])(\d+)\1[^>]*>[\s\S]*?<a\b[^>]*>([\s\S]*?)<\/a>[\s\S]*?<\/li>/gi;
-    let m;
-    while ((m = itemRe.exec(section)) !== null) {
-      const serverId = String(m[2] || "").trim();
-      const label = this._stripTags(this._clean(m[3] || ""));
-      const name = this._normalizeServerName(label);
-      if (serverId && name) blocks.push({ name, id: serverId });
-    }
-
-    if (!blocks.length) {
-      const liRe = /<li\b[^>]*\bdata-id=(["'])(\d+)\1[^>]*>[\s\S]*?<\/li>/gi;
-      let lm;
-      while ((lm = liRe.exec(section)) !== null) {
-        const serverId = String(lm[2] || "").trim();
-        const aM = lm[0].match(/<a\b[^>]*>([\s\S]*?)<\/a>/i);
-        const name = this._normalizeServerName(aM ? this._stripTags(this._clean(aM[1] || "")) : "");
-        if (serverId && name) blocks.push({ name, id: serverId });
-      }
-    }
-
     const seen = new Map();
-    for (const b of blocks) { if (!seen.has(b.name)) seen.set(b.name, b.id); }
-    return [...seen.entries()].map(([name, id]) => ({ name, id }));
+    const add = (id, name) => {
+      const norm = this._normalizeServerName(name);
+      if (id && norm && !seen.has(norm)) { seen.set(norm, id); blocks.push({ name: norm, id }); }
+    };
+
+    const attrRe = /<(?:div|li|span|button|a)\b([^>]*)\bdata-type=(["'])(\w+)\2([^>]*)>/gi;
+    let am;
+    while ((am = attrRe.exec(src)) !== null) {
+      const attrs = am[1] + am[4];
+      if (am[3].toLowerCase() !== t) continue;
+      const idM = attrs.match(/\bdata-id=(["'])(\d+)\1/) || attrs.match(/\bdata-server-id=(["'])(\d+)\1/);
+      if (!idM) continue;
+      const serverId = idM[2];
+      const chunk = src.slice(am.index + am[0].length, am.index + am[0].length + 200);
+      const label = this._stripTags(this._clean(chunk.split(/<\/?(?:div|li|ul)[^>]*>/i)[0] || ""));
+      if (label) add(serverId, label);
+    }
+
+    if (blocks.length) return blocks;
+    const wrapRe = new RegExp(
+      `(?:class|data-value)=(["'])[^"']*(?:${t}|ps_-block-${t}|server-${t})[^"']*\\1[\\s\\S]*?` +
+      `(?=(?:class|data-value)=(["'])[^"']*(?:sub|dub)[^"']*\\2|$)`,
+      "i"
+    );
+    const wm = wrapRe.exec(src);
+    const section = wm ? wm[0] : src;
+
+    const elemRe = /<(?:div|li|span|button|a)\b([^>]*)>/gi;
+    let em;
+    while ((em = elemRe.exec(section)) !== null) {
+      const attrs = em[1];
+      if (!/\bdata-id=/.test(attrs)) continue;
+      const idM = attrs.match(/\bdata-id=(["'])(\d+)\1/);
+      if (!idM) continue;
+      const chunk = section.slice(em.index + em[0].length, em.index + em[0].length + 200);
+      const label = this._stripTags(this._clean(chunk.split(/<\/?(div|li|ul)[^>]*>/i)[0] || ""));
+      if (label) add(idM[2], label);
+    }
+
+    return blocks;
   }
 
   findEpisodeServer(episodeObj, serverName) {
@@ -442,6 +456,9 @@ class HiAnime {
       if (!html) throw new Error(`No server list found for episode ${epId}`);
 
       servers = this._parseServersForTrack(html, track);
+      if (!servers.length) {
+        try { Native.log("findEpisodeServer: parsed 0 servers from HTML: " + html.slice(0, 500)); } catch {}
+      }
 
       const hasDub = /data-type=(["'])dub\1/i.test(html);
       const numId = this._extractId(ep.animeId || epId);
