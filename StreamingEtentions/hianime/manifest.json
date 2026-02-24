@@ -1,1 +1,9 @@
-
+{
+  "name": "HiAnime",
+  "version": "3.0.7",
+  "entry": "source.js",
+  "type": "anime-streaming",
+  "website": "https://hianime.to",
+  "supportsSub": true,
+  "supportsDub": true
+}
