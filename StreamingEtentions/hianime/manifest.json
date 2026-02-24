@@ -1,4 +1,5 @@
 {
+  "id": "hianime",
   "name": "HiAnime",
   "version": "3.0.7",
   "entry": "source.js",
