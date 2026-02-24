@@ -1,7 +1,7 @@
 class HiAnime {
   constructor() {
     this.type = "anime-streaming";
-    this.version = "3.0.8";
+    this.version = "3.0.9";
     this.baseUrl = "https://hianime.to";
     this._cache = {
       dub: new Map(),
@@ -647,7 +647,9 @@ class HiAnime {
   }
 
   _buildStreamResponse(embed, serverName) {
-    let decrypt, headers;
+    let decrypt = null;
+    let headers = {};
+    let usedFallback = false;
 
     try {
       decrypt = this._extractMega(embed);
@@ -657,6 +659,7 @@ class HiAnime {
         const fbUrl = "https://ac-api.ofchaos.com/api/anime/embed/convert/v2?embedUrl=" + encodeURIComponent(embed);
         const fb = this._fetchJson(fbUrl, {});
         decrypt = fb || {};
+        usedFallback = true;
         const u = new URL(embed);
         headers = {
           "Referer": u.protocol + "//" + u.host + "/",
@@ -668,12 +671,24 @@ class HiAnime {
       }
     }
 
+    if (!decrypt || typeof decrypt !== "object") {
+      throw new Error("Invalid decryption response");
+    }
+
     const srcs = Array.isArray(decrypt.sources) ? decrypt.sources : [];
-    const stream = srcs.find(s => s && s.type === "hls" && s.file) || srcs.find(s => s && s.file);
+    let stream = srcs.find(s => s && s.type === "hls" && s.file) || srcs.find(s => s && s.file);
 
-    if (!stream || !stream.file) throw new Error("No video source in response");
+    if (!stream && usedFallback && decrypt.url) {
+      stream = { file: decrypt.url, type: "hls" };
+    }
 
-    const subs = Array.isArray(decrypt.tracks) ? decrypt.tracks.filter(t => t && (t.kind === "captions" || t.kind === "subtitles")) : [];
+    if (!stream || !stream.file) {
+      throw new Error("No video source in response");
+    }
+
+    const subs = Array.isArray(decrypt.tracks) 
+      ? decrypt.tracks.filter(t => t && (t.kind === "captions" || t.kind === "subtitles")) 
+      : [];
 
     const subtitles = subs.map((t, i) => ({
       id: t.label || `sub_${i}`,
