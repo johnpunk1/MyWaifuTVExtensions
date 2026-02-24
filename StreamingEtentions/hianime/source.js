@@ -751,6 +751,4 @@ class HiAnime {
   }
 }
 
-if (typeof module !== "undefined" && module.exports) {
-  module.exports = HiAnime;
-}
+module.exports = new HiAnime();
