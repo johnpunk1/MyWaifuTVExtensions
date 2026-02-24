@@ -1,12 +1,13 @@
 class HiAnime {
   constructor() {
     this.type = "anime-streaming";
-    this.version = "3.0.6";
+    this.version = "3.0.7"; 
     this.baseUrl = "https://hianime.to";
     this._cache = {
       dub: new Map(),
       search: new Map(),
       serverCheck: new Map(),
+      episodes: new Map(),
       _maxSize: 200,
       _expiry: 5 * 60 * 1000
     };
@@ -231,8 +232,8 @@ class HiAnime {
 
       if (!href || href.startsWith("search?")) continue;
 
-      const isNavItem = /\bclass=(["'])[^\1]*\bnav-item\b[^\1]*\1/i.test(attrs) || /\bnav-item\b/i.test(attrs);
-      const looksLikeAnimePage = href.includes("/watch/") || /-\d+$/.test(href) || /\bwatch\b/.test(href);
+      const isNavItem = /\bnav-item\b/i.test(attrs);
+      const looksLikeAnimePage = href.includes("/watch/") || /-\d+$/.test(href) || /\bwatch\b/i.test(href);
       if (!isNavItem && !looksLikeAnimePage) continue;
 
       const id = this._extractId(href);
@@ -244,8 +245,8 @@ class HiAnime {
       const jM = inner.match(/\bdata-jname=(["'])(.*?)\1/i);
       if (jM) jname = this._clean(jM[2]);
 
-      const h3M = inner.match(/<h3[^>]*class=(["'])[^\1]*\bfilm-name\b[^\1]*\1[^>]*>([\s\S]*?)<\/h3>/i);
-      if (h3M) title = this._stripTags(this._clean(h3M[2]));
+      const h3M = inner.match(/<h3[^>]*\bfilm-name\b[^>]*>([\s\S]*?)<\/h3>/i);
+      if (h3M) title = this._stripTags(this._clean(h3M[1]));
 
       if (!title) {
         const tAttr = inner.match(/\btitle=(["'])(.*?)\1/i);
@@ -265,10 +266,7 @@ class HiAnime {
       seen.add(key);
 
       let finalPath = href;
-      if (!finalPath.startsWith("watch/") && !finalPath.includes("/watch/")) {
-      } else {
-        finalPath = finalPath.replace(/^\/+/, "");
-      }
+      finalPath = finalPath.replace(/^\/+/, "");
 
       results.push({
         id,
@@ -531,10 +529,16 @@ class HiAnime {
   }
 
   findEpisodes(Id) {
+    this._cleanCache();
+
     const [id, trackRaw] = String(Id || "").split("/");
     const track = trackRaw === "dub" ? "dub" : "sub";
     const numId = this._extractId(id);
     if (!numId) return [];
+
+    const cacheKey = `${numId}|${track}`;
+    const cached = this._cache.episodes.get(cacheKey);
+    if (cached) return cached.v;
 
     const episodes = [];
     const seen = new Set();
@@ -543,13 +547,22 @@ class HiAnime {
       const html = this._fetchEpisodeListPage(numId, page);
       if (!html) break;
 
-      const aTagRe = /<a\b[^>]*\bclass=(["'])[^\1]*\bep-item\b[^\1]*\1[^>]*>/gi;
-      const tags = html.match(aTagRe) || [];
-      if (!tags.length) break;
-
       let addedThisPage = 0;
 
-      for (const tag of tags) {
+      const aTagRe = /<a\b[^>]*>/gi;
+      let m;
+      while ((m = aTagRe.exec(html)) !== null) {
+        const tag = m[0] || "";
+        if (!tag) continue;
+
+        const hasEpClass = /\bep-item\b/i.test(tag);
+        const hasDataId = /\bdata-id\b/i.test(tag);
+        const hasDataNum = /\bdata-number\b/i.test(tag);
+
+        if (!hasDataId || !hasDataNum) continue;
+        if (!hasEpClass && page === 1) {
+        }
+
         const idM = tag.match(/\bdata-id=(["'])(\d+)\1/i);
         const numM = tag.match(/\bdata-number=(["'])([^"']+)\1/i);
         const hrefM = tag.match(/\bhref=(["'])([^"']+)\1/i);
@@ -578,11 +591,16 @@ class HiAnime {
         addedThisPage++;
       }
 
-      if (addedThisPage === 0) break;
+      if (addedThisPage === 0) {
+        break;
+      }
     }
 
     episodes.sort((a, b) => a.number - b.number);
-    return episodes;
+
+    const out = episodes;
+    this._cache.episodes.set(cacheKey, { v: out, t: Date.now() });
+    return out;
   }
 
   _normalizeServerName(name) {
@@ -724,21 +742,7 @@ class HiAnime {
       decrypt = this._extractMega(embed);
       headers = decrypt.headers || {};
     } catch (e) {
-      try {
-        const fb = this._fetchJson(
-          `https://ac-api.ofchaos.com/api/anime/embed/convert/v2?embedUrl=${encodeURIComponent(embed)}`,
-          {}
-        );
-        decrypt = fb || {};
-        const u = new URL(embed);
-        headers = {
-          "Referer": `${u.protocol}//${u.host}/`,
-          "Origin": `${u.protocol}//${u.host}`,
-          "User-Agent": "Mozilla/5.0"
-        };
-      } catch (e2) {
-        throw new Error("Failed to extract stream: " + e.message);
-      }
+      throw new Error("Failed to extract stream");
     }
 
     const srcs = Array.isArray(decrypt.sources) ? decrypt.sources : [];
