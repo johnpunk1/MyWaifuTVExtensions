@@ -1,0 +1,10 @@
+{
+  "id": "anicrush",
+  "name": "AniCrush",
+  "version": "1.0.0",
+  "entry": "source.js",
+  "type": "anime-streaming",
+  "website": "https://anicrush.to",
+  "supportsSub": true,
+  "supportsDub": true
+}
