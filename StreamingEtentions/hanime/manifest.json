@@ -1,0 +1,10 @@
+{
+  "id": "hanime",
+  "name": "Hanime",
+  "version": "1.0.0",
+  "entry": "source.js",
+  "type": "anime-streaming",
+  "website": "https://hanime.tv",
+  "supportsSub": false,
+  "supportsDub": false
+}
