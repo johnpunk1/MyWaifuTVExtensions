@@ -143,6 +143,17 @@ class AniCrush {
     return { year: parseInt(m[3], 10) || 0, month: months[m[1]] || 0 };
   }
 
+  _resolveServerValue(preferred) {
+    const serverMap = {
+      "southcloud-1": 4,
+      "southcloud-2": 1,
+      "southcloud-3": 6
+    };
+    const key = String(preferred || "").toLowerCase().trim();
+    const val = serverMap[key];
+    return (val !== undefined && val !== null) ? val : 4;
+  }
+
   search(arg) {
     arg = this._parseArg(arg);
     const q = String(arg.query || "").trim();
@@ -244,7 +255,9 @@ class AniCrush {
     for (const group of Object.values(groups)) {
       if (!Array.isArray(group)) continue;
       for (const ep of group) {
-        const num = parseFloat(ep.number);
+        // FIX: support both integer and float episode numbers from API
+        const numRaw = ep.number !== undefined ? ep.number : ep.num;
+        const num = parseFloat(numRaw);
         if (!isFinite(num)) continue;
         episodes.push({
           id: `${id}/${track}`,
@@ -264,34 +277,34 @@ class AniCrush {
     let ep = episodeObj;
     if (typeof episodeObj === "string") { try { ep = JSON.parse(episodeObj); } catch { ep = {}; } }
 
-    const [id, trackRaw] = String((ep && ep.id) || "").split("/");
+    const rawId = String((ep && ep.id) || "");
+    const parts = rawId.split("/");
+    const id = parts[0];
+    const trackRaw = parts[1];
+
     if (!id) throw new Error("Missing episode id in episodeObj");
 
     const track = trackRaw === "dub" ? "dub" : "sub";
-    const preferred = String(serverName || "Southcloud-1").trim();
+
+    const sv = this._resolveServerValue(serverName);
+    const sc = track;
+
     const episodeNumber = parseFloat(ep.number);
     if (!isFinite(episodeNumber)) throw new Error("Missing episode number");
 
-    const serverMap = {
-      "Southcloud-1": 4,
-      "Southcloud-2": 1,
-      "Southcloud-3": 6
-    };
+    const epParam = Number.isInteger(episodeNumber) ? String(episodeNumber) : String(episodeNumber);
 
-    const sv = serverMap[preferred] != null ? serverMap[preferred] : 4;
-    const sc = track === "dub" ? "dub" : "sub";
-
-    const cacheKey = `src:${id}:${episodeNumber}:${sv}:${sc}`;
+    const cacheKey = `src:${id}:${epParam}:${sv}:${sc}`;
     const cached = this._cacheGet(this._cache.servers, cacheKey);
     if (cached !== undefined) return cached;
 
-    const encUrl = `${this.apiUrl}/shared/v2/episode/sources?_movieId=${id}&ep=${episodeNumber}&sv=${sv}&sc=${sc}`;
+    const encUrl = `${this.apiUrl}/shared/v2/episode/sources?_movieId=${id}&ep=${epParam}&sv=${sv}&sc=${sc}`;
     const json = this._fetchJson(encUrl, this._headers(true));
     const encryptedIframe = String((json && json.result && json.result.link) || "");
-    if (!encryptedIframe) throw new Error(`No embed link returned from server '${preferred}'`);
+    if (!encryptedIframe) throw new Error(`No embed link returned from server (sv=${sv}, sc=${sc})`);
 
-    const resp = this._buildStreamResponse(encryptedIframe, preferred);
-    if (!this._looksPlayable(resp)) throw new Error(`Server '${preferred}' returned no playable video sources`);
+    const resp = this._buildStreamResponse(encryptedIframe, serverName || "Southcloud-1");
+    if (!this._looksPlayable(resp)) throw new Error(`Server sv=${sv} returned no playable video sources`);
 
     this._cacheSet(this._cache.servers, cacheKey, resp);
     return resp;
