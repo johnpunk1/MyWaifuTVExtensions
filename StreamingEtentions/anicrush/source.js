@@ -1,7 +1,7 @@
 class AniCrush {
   constructor() {
     this.type = "anime-streaming";
-    this.version = "1.0.0";
+    this.version = "1.0.1";
     this.baseUrl = "https://anicrush.to";
     this.apiUrl = "https://api.anicrush.to";
     this._cache = {
@@ -30,7 +30,10 @@ class AniCrush {
   _cacheGet(map, key) {
     const e = map.get(key);
     if (!e) return undefined;
-    if (Date.now() - e.t > this._cache._ttl) { map.delete(key); return undefined; }
+    if (Date.now() - e.t > this._cache._ttl) {
+      map.delete(key);
+      return undefined;
+    }
     return e.v;
   }
 
@@ -56,12 +59,31 @@ class AniCrush {
 
   _nativeFetch(url, method, headers, body) {
     try {
-      const raw = Native.fetch(String(url), method || "GET", JSON.stringify(headers || {}), body == null ? "" : String(body));
+      const raw = Native.fetch(
+        String(url),
+        method || "GET",
+        JSON.stringify(headers || {}),
+        body == null ? "" : String(body)
+      );
       let j = {};
-      try { j = JSON.parse(raw || "{}"); } catch { j = {}; }
-      return { ok: !!j.ok, status: Number(j.status || 0), headers: j.headers || {}, body: String(j.body || ""), error: String(j.error || ""), message: String(j.message || "") };
+      try { j = JSON.parse(raw || "{}"); } catch (_) { j = {}; }
+      return {
+        ok: !!j.ok,
+        status: Number(j.status || 0),
+        headers: j.headers || {},
+        body: String(j.body || ""),
+        error: String(j.error || ""),
+        message: String(j.message || "")
+      };
     } catch (e) {
-      return { ok: false, status: 0, headers: {}, body: "", error: "NATIVE_FETCH_FAIL", message: "" + e };
+      return {
+        ok: false,
+        status: 0,
+        headers: {},
+        body: "",
+        error: "NATIVE_FETCH_FAIL",
+        message: String(e)
+      };
     }
   }
 
@@ -75,7 +97,7 @@ class AniCrush {
     try {
       const obj = JSON.parse(txt);
       return (obj && typeof obj === "object") ? obj : {};
-    } catch {
+    } catch (_) {
       return {};
     }
   }
@@ -109,12 +131,14 @@ class AniCrush {
     const dp = Array.from({ length: lenA + 1 }, () => new Array(lenB + 1).fill(0));
     for (let i = 0; i <= lenA; i++) dp[i][0] = i;
     for (let j = 0; j <= lenB; j++) dp[0][j] = j;
+
     for (let i = 1; i <= lenA; i++) {
       for (let j = 1; j <= lenB; j++) {
         if (a[i - 1] === b[j - 1]) dp[i][j] = dp[i - 1][j - 1];
         else dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
       }
     }
+
     const maxLen = Math.max(lenA, lenB);
     return maxLen ? 1 - dp[lenA][lenB] / maxLen : 1;
   }
@@ -122,7 +146,11 @@ class AniCrush {
   _parseArg(arg) {
     if (typeof arg === "string") {
       const s = arg.trim();
-      try { return (s.startsWith("{") || s.startsWith("[")) ? JSON.parse(s) : { query: s }; } catch { return { query: s }; }
+      try {
+        return (s.startsWith("{") || s.startsWith("[")) ? JSON.parse(s) : { query: s };
+      } catch (_) {
+        return { query: s };
+      }
     }
     return arg || {};
   }
@@ -137,10 +165,13 @@ class AniCrush {
   _normalizeDate(dateStr) {
     const s = String(dateStr || "").trim();
     if (!s) return null;
-    const months = { Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
+    const months = { Jan:1, Feb:2, Mar:3, Apr:4, May:5, Jun:6, Jul:7, Aug:8, Sep:9, Oct:10, Nov:11, Dec:12 };
     const m = s.match(/([A-Za-z]{3})\s+(\d{1,2}),\s*(\d{4})/);
     if (!m) return null;
-    return { year: parseInt(m[3], 10) || 0, month: months[m[1]] || 0 };
+    return {
+      year: parseInt(m[3], 10) || 0,
+      month: months[m[1]] || 0
+    };
   }
 
   _resolveServerValue(preferred) {
@@ -156,22 +187,28 @@ class AniCrush {
 
   search(arg) {
     arg = this._parseArg(arg);
+
     const q = String(arg.query || "").trim();
     if (!q) return [];
+
     const track = this._getTrack(arg);
     const media = arg.media || {};
     const start = media.startDate || {};
     const targetYear = parseInt(start.year, 10) || 0;
     const targetMonth = parseInt(start.month, 10) || 0;
 
-    const cacheKey = `${q}|${track}|${targetYear}`;
+    const cacheKey = `${q}|${track}|${targetYear}|${targetMonth}|${String(media.format || "")}`;
     const cached = this._cacheGet(this._cache.search, cacheKey);
     if (cached !== undefined) return cached;
 
     const url = `${this.apiUrl}/shared/v2/movie/list?keyword=${encodeURIComponent(q)}&limit=48&page=1`;
     const data = this._fetchJson(url, this._headers(true));
     const movies = (data && data.result && data.result.movies) || [];
-    if (!movies.length) { this._cacheSet(this._cache.search, cacheKey, []); return []; }
+
+    if (!movies.length) {
+      this._cacheSet(this._cache.search, cacheKey, []);
+      return [];
+    }
 
     let matches = movies.map(movie => ({
       id: String(movie.id || ""),
@@ -195,6 +232,7 @@ class AniCrush {
     const looseTitle = m =>
       this._levenshteinSimilarity(m.normTitle, targetNorm) > 0.8 ||
       this._levenshteinSimilarity(m.normTitleJP, targetNormJP) > 0.8;
+
     const dateYM = m => m.startDate && m.startDate.year === targetYear && m.startDate.month === targetMonth;
     const dateY = m => m.startDate && m.startDate.year === targetYear;
     const exactFormat = m => !targetFormat || m.format === targetFormat;
@@ -216,9 +254,14 @@ class AniCrush {
 
     if (!filtered.length) {
       filtered = matches.filter(m => {
-        return m.normTitle === targetNorm || m.normTitleJP === targetNormJP ||
-          m.normTitle.includes(targetNorm) || targetNorm.includes(m.normTitle) ||
-          m.normTitleJP.includes(targetNormJP) || targetNormJP.includes(m.normTitleJP);
+        return (
+          m.normTitle === targetNorm ||
+          m.normTitleJP === targetNormJP ||
+          m.normTitle.includes(targetNorm) ||
+          targetNorm.includes(m.normTitle) ||
+          m.normTitleJP.includes(targetNormJP) ||
+          targetNormJP.includes(m.normTitleJP)
+        );
       });
       filtered.sort((a, b) => a.normTitle.length - b.normTitle.length);
     }
@@ -255,10 +298,10 @@ class AniCrush {
     for (const group of Object.values(groups)) {
       if (!Array.isArray(group)) continue;
       for (const ep of group) {
-        // FIX: support both integer and float episode numbers from API
         const numRaw = ep.number !== undefined ? ep.number : ep.num;
         const num = parseFloat(numRaw);
         if (!isFinite(num)) continue;
+
         episodes.push({
           id: `${id}/${track}`,
           number: num,
@@ -273,9 +316,36 @@ class AniCrush {
     return episodes;
   }
 
+  checkDubForEpisode(arg) {
+    let obj = arg;
+    if (typeof arg === "string") {
+      try { obj = JSON.parse(arg); } catch (_) { obj = {}; }
+    }
+
+    const animeId = String((obj && (obj.animeId || obj.id || obj.movieId)) || "").trim();
+    const episodeNumber = parseFloat(obj && (obj.episodeNumber ?? obj.number ?? obj.ep));
+    if (!animeId || !isFinite(episodeNumber)) return false;
+
+    const cacheKey = `${animeId}|${episodeNumber}`;
+    const cached = this._cacheGet(this._cache.dubEp, cacheKey);
+    if (cached !== undefined) return cached;
+
+    try {
+      const eps = this.findEpisodes(`${animeId}/dub`);
+      const hasDub = Array.isArray(eps) && eps.some(ep => Number(ep.number) === episodeNumber);
+      this._cacheSet(this._cache.dubEp, cacheKey, hasDub);
+      return hasDub;
+    } catch (_) {
+      this._cacheSet(this._cache.dubEp, cacheKey, false);
+      return false;
+    }
+  }
+
   findEpisodeServer(episodeObj, serverName) {
     let ep = episodeObj;
-    if (typeof episodeObj === "string") { try { ep = JSON.parse(episodeObj); } catch { ep = {}; } }
+    if (typeof episodeObj === "string") {
+      try { ep = JSON.parse(episodeObj); } catch (_) { ep = {}; }
+    }
 
     const rawId = String((ep && ep.id) || "");
     const parts = rawId.split("/");
@@ -285,15 +355,13 @@ class AniCrush {
     if (!id) throw new Error("Missing episode id in episodeObj");
 
     const track = trackRaw === "dub" ? "dub" : "sub";
-
     const sv = this._resolveServerValue(serverName);
     const sc = track;
 
     const episodeNumber = parseFloat(ep.number);
     if (!isFinite(episodeNumber)) throw new Error("Missing episode number");
 
-    const epParam = Number.isInteger(episodeNumber) ? String(episodeNumber) : String(episodeNumber);
-
+    const epParam = String(episodeNumber);
     const cacheKey = `src:${id}:${epParam}:${sv}:${sc}`;
     const cached = this._cacheGet(this._cache.servers, cacheKey);
     if (cached !== undefined) return cached;
@@ -304,7 +372,9 @@ class AniCrush {
     if (!encryptedIframe) throw new Error(`No embed link returned from server (sv=${sv}, sc=${sc})`);
 
     const resp = this._buildStreamResponse(encryptedIframe, serverName || "Southcloud-1");
-    if (!this._looksPlayable(resp)) throw new Error(`Server sv=${sv} returned no playable video sources`);
+    if (!this._looksPlayable(resp)) {
+      throw new Error(`Server sv=${sv} returned no playable video sources`);
+    }
 
     this._cacheSet(this._cache.servers, cacheKey, resp);
     return resp;
@@ -318,15 +388,27 @@ class AniCrush {
 
   _buildStreamResponse(embed, serverName) {
     let decrypt;
-    try { decrypt = this._extractMega(embed); } catch (e) { throw new Error("Stream extraction failed: " + e.message); }
+    try {
+      decrypt = this._extractMega(embed);
+    } catch (e) {
+      throw new Error("Stream extraction failed: " + e.message);
+    }
 
     const srcs = Array.isArray(decrypt.sources) ? decrypt.sources : [];
-    const stream = srcs.find(s => s && s.type === "hls" && s.file) || srcs.find(s => s && s.file);
+    const stream =
+      srcs.find(s => s && s.type === "hls" && s.file) ||
+      srcs.find(s => s && s.file);
+
     if (!stream || !stream.file) throw new Error("No stream file in embed response");
 
     const subs = (Array.isArray(decrypt.tracks) ? decrypt.tracks : [])
       .filter(t => t && t.kind === "captions" && t.file)
-      .map((t, i) => ({ id: `sub-${i}`, language: t.label || "Unknown", url: t.file, isDefault: !!t.default }));
+      .map((t, i) => ({
+        id: `sub-${i}`,
+        language: t.label || "Unknown",
+        url: t.file,
+        isDefault: !!t.default
+      }));
 
     return {
       server: serverName,
@@ -366,7 +448,10 @@ class AniCrush {
     }
     if (!nonce) throw new Error("Nonce not found in embed page");
 
-    const data = this._fetchJson(`${base}embed-2/v3/e-1/getSources?id=${idM[1]}&_k=${nonce}`, headers);
+    const data = this._fetchJson(
+      `${base}embed-2/v3/e-1/getSources?id=${idM[1]}&_k=${nonce}`,
+      headers
+    );
 
     return {
       sources: data.sources || [],
