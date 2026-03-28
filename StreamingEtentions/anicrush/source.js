@@ -1,15 +1,15 @@
 class AniCrush {
   constructor() {
     this.type = "anime-streaming";
-    this.version = "1.0.1";
+    this.version = "1.0.0";
     this.baseUrl = "https://anicrush.to";
     this.apiUrl = "https://api.anicrush.to";
     this._cache = {
-      dub:      new Map(),
-      dubEp:    new Map(),
-      search:   new Map(),
+      dub: new Map(),
+      dubEp: new Map(),
+      search: new Map(),
       episodes: new Map(),
-      servers:  new Map(),
+      servers: new Map(),
       _maxSize: 300,
       _ttl: 8 * 60 * 1000
     };
@@ -39,7 +39,7 @@ class AniCrush {
 
   _cacheSet(map, key, value) {
     if (map.size >= this._cache._maxSize) {
-      const entries = [...map.entries()].sort((a, b) => a[1].t - b[1].t);
+      const entries = Array.from(map.entries()).sort((a, b) => a[1].t - b[1].t);
       const evict = Math.ceil(entries.length * 0.3);
       for (let i = 0; i < evict; i++) map.delete(entries[i][0]);
     }
@@ -82,7 +82,7 @@ class AniCrush {
         headers: {},
         body: "",
         error: "NATIVE_FETCH_FAIL",
-        message: String(e)
+        message: "" + e
       };
     }
   }
@@ -96,7 +96,7 @@ class AniCrush {
     if (!txt) return {};
     try {
       const obj = JSON.parse(txt);
-      return (obj && typeof obj === "object") ? obj : {};
+      return obj && typeof obj === "object" ? obj : {};
     } catch (_) {
       return {};
     }
@@ -107,28 +107,68 @@ class AniCrush {
       .replace(/\\u0026/g, "&").replace(/&(?:amp|#38);/g, "&")
       .replace(/&quot;/g, '"').replace(/&(?:#39|apos);/g, "'")
       .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-      .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
+      .replace(/&#(\d+);/g, function (_, n) { return String.fromCharCode(parseInt(n, 10)); });
   }
 
   _norm(title) {
     let s = String(title || "").toLowerCase();
     s = s.replace(/\b(season|cour|part|the|animation|movie|uncensored)\b/g, " ");
-    s = s.replace(/\b(\d+)(st|nd|rd|th)\b/g, (_, n) => n);
+    s = s.replace(/\b(first|one)\b/g, "1");
+    s = s.replace(/\b(second|two)\b/g, "2");
+    s = s.replace(/\b(third|three)\b/g, "3");
+    s = s.replace(/\b(fourth|four)\b/g, "4");
+    s = s.replace(/\b(fifth|five)\b/g, "5");
+    s = s.replace(/\b(\d+)(st|nd|rd|th)\b/g, function (_, n) { return n; });
     s = s.replace(/\biii\b/g, "3").replace(/\bii\b/g, "2").replace(/\biv\b/g, "4").replace(/\bv\b/g, "5");
     s = s.replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
     return s;
   }
 
   _normalizeTitle(title) {
-    return String(title || "").toLowerCase()
-      .replace(/(season|cour|part|uncensored)/g, "")
-      .replace(/\d+(st|nd|rd|th)/g, m => m.replace(/st|nd|rd|th/, ""))
-      .replace(/[^a-z0-9]+/g, "");
+    return this._norm(title).replace(/[^a-z0-9]+/g, "");
+  }
+
+  _tokenizeTitle(title) {
+    const stop = {
+      season: 1, cour: 1, part: 1, the: 1, animation: 1, movie: 1, uncensored: 1,
+      tv: 1, ova: 1, ona: 1, special: 1, specials: 1
+    };
+    const s = this._norm(title);
+    if (!s) return [];
+    const tokens = s.split(/\s+/).filter(function (t) {
+      if (!t || stop[t]) return false;
+      if (/^\d+$/.test(t)) return false;
+      return t.length >= 2;
+    });
+    return Array.from(new Set(tokens));
+  }
+
+  _variantNorms(title) {
+    const base = this._normalizeTitle(title);
+    const out = {};
+    if (base) out[base] = true;
+
+    if (base.indexOf("oshinoko") !== -1) out["mystar" + base.replace(/oshinoko/g, "")] = true;
+    if (base.indexOf("mystar") !== -1) out["oshinoko" + base.replace(/mystar/g, "")] = true;
+
+    if (base.indexOf("bokunoyabaiyatsu") !== -1) out["thedangersinmyheart" + base.replace(/bokunoyabaiyatsu/g, "")] = true;
+    if (base.indexOf("thedangersinmyheart") !== -1) out["bokunoyabaiyatsu" + base.replace(/thedangersinmyheart/g, "")] = true;
+
+    return Object.keys(out).filter(Boolean);
   }
 
   _levenshteinSimilarity(a, b) {
-    const lenA = a.length, lenB = b.length;
-    const dp = Array.from({ length: lenA + 1 }, () => new Array(lenB + 1).fill(0));
+    a = String(a || "");
+    b = String(b || "");
+    const lenA = a.length;
+    const lenB = b.length;
+    if (!lenA && !lenB) return 1;
+    if (!lenA || !lenB) return 0;
+
+    const dp = Array.from({ length: lenA + 1 }, function () {
+      return new Array(lenB + 1).fill(0);
+    });
+
     for (let i = 0; i <= lenA; i++) dp[i][0] = i;
     for (let j = 0; j <= lenB; j++) dp[0][j] = j;
 
@@ -140,7 +180,7 @@ class AniCrush {
     }
 
     const maxLen = Math.max(lenA, lenB);
-    return maxLen ? 1 - dp[lenA][lenB] / maxLen : 1;
+    return 1 - dp[lenA][lenB] / maxLen;
   }
 
   _parseArg(arg) {
@@ -185,6 +225,119 @@ class AniCrush {
     return (val !== undefined && val !== null) ? val : 4;
   }
 
+  _sameYear(date, year) {
+    year = parseInt(year, 10) || 0;
+    return !!(year && date && date.year === year);
+  }
+
+  _sameYearMonth(date, year, month) {
+    year = parseInt(year, 10) || 0;
+    month = parseInt(month, 10) || 0;
+    return !!(year && month && date && date.year === year && date.month === month);
+  }
+
+  _tokenOverlap(aTokens, bTokens) {
+    const set = {};
+    for (let i = 0; i < aTokens.length; i++) set[aTokens[i]] = true;
+    let hit = 0;
+    for (let j = 0; j < bTokens.length; j++) {
+      if (set[bTokens[j]]) hit++;
+    }
+    return hit;
+  }
+
+  _isStrongTitleMatch(movie, targetNorm, targetNormJP, targetTokens, targetTokensJP) {
+    const candNorms = []
+      .concat(this._variantNorms(movie.title))
+      .concat(this._variantNorms(movie.titleJP));
+
+    const targetNorms = []
+      .concat(this._variantNorms(targetNorm))
+      .concat(this._variantNorms(targetNormJP))
+      .concat([targetNorm, targetNormJP])
+      .filter(Boolean);
+
+    for (let i = 0; i < candNorms.length; i++) {
+      const cn = candNorms[i];
+      if (!cn || cn.length < 2) continue;
+      for (let j = 0; j < targetNorms.length; j++) {
+        const tn = targetNorms[j];
+        if (!tn || tn.length < 2) continue;
+
+        if (cn === tn) return true;
+
+        const minLen = Math.min(cn.length, tn.length);
+        if (minLen >= 6 && (cn.indexOf(tn) !== -1 || tn.indexOf(cn) !== -1)) return true;
+
+        if (minLen >= 6 && this._levenshteinSimilarity(cn, tn) >= 0.88) return true;
+      }
+    }
+
+    const candTokens = movie.tokens || [];
+    const candTokensJP = movie.tokensJP || [];
+    if (this._tokenOverlap(candTokens, targetTokens) >= 2) return true;
+    if (this._tokenOverlap(candTokens, targetTokensJP) >= 2) return true;
+    if (this._tokenOverlap(candTokensJP, targetTokens) >= 2) return true;
+    if (this._tokenOverlap(candTokensJP, targetTokensJP) >= 2) return true;
+
+    return false;
+  }
+
+  _rankMatches(matches, targetNorm, targetNormJP, targetTokens, targetTokensJP, targetYear, targetMonth, targetFormat) {
+    const self = this;
+    return matches.map(function (m) {
+      let score = 0;
+
+      const candNorms = []
+        .concat(self._variantNorms(m.title))
+        .concat(self._variantNorms(m.titleJP));
+
+      const targetNorms = []
+        .concat(self._variantNorms(targetNorm))
+        .concat(self._variantNorms(targetNormJP))
+        .concat([targetNorm, targetNormJP])
+        .filter(Boolean);
+
+      let bestSim = 0;
+      for (let i = 0; i < candNorms.length; i++) {
+        const cn = candNorms[i];
+        if (!cn) continue;
+        for (let j = 0; j < targetNorms.length; j++) {
+          const tn = targetNorms[j];
+          if (!tn) continue;
+          if (cn === tn) bestSim = Math.max(bestSim, 1);
+          else bestSim = Math.max(bestSim, self._levenshteinSimilarity(cn, tn));
+          if (cn.length >= 6 && tn.length >= 6 && (cn.indexOf(tn) !== -1 || tn.indexOf(cn) !== -1)) {
+            bestSim = Math.max(bestSim, 0.96);
+          }
+        }
+      }
+
+      score += Math.round(bestSim * 1000);
+
+      const overlap =
+        Math.max(
+          self._tokenOverlap(m.tokens || [], targetTokens || []),
+          self._tokenOverlap(m.tokens || [], targetTokensJP || []),
+          self._tokenOverlap(m.tokensJP || [], targetTokens || []),
+          self._tokenOverlap(m.tokensJP || [], targetTokensJP || [])
+        );
+      score += overlap * 140;
+
+      if (targetFormat && m.format === targetFormat) score += 60;
+      if (self._sameYear(m.startDate, targetYear)) score += 80;
+      if (self._sameYearMonth(m.startDate, targetYear, targetMonth)) score += 40;
+
+      if (bestSim < 0.55) score -= 300;
+      if (overlap === 0 && bestSim < 0.9) score -= 220;
+
+      m._score = score;
+      return m;
+    }).sort(function (a, b) {
+      return b._score - a._score;
+    });
+  }
+
   search(arg) {
     arg = this._parseArg(arg);
 
@@ -197,11 +350,23 @@ class AniCrush {
     const targetYear = parseInt(start.year, 10) || 0;
     const targetMonth = parseInt(start.month, 10) || 0;
 
-    const cacheKey = `${q}|${track}|${targetYear}|${targetMonth}|${String(media.format || "")}`;
+    const targetEnglish = String(media.englishTitle || q || "");
+    const targetRomaji = String(media.romajiTitle || q || "");
+
+    const targetNorm = this._normalizeTitle(targetEnglish);
+    const targetNormJP = this._normalizeTitle(targetRomaji);
+    const targetTokens = this._tokenizeTitle(targetEnglish);
+    const targetTokensJP = this._tokenizeTitle(targetRomaji);
+    const targetFormat = String(media.format || "").toUpperCase();
+
+    const cacheKey = [
+      q, track, targetYear, targetMonth, targetEnglish, targetRomaji, targetFormat
+    ].join("|");
+
     const cached = this._cacheGet(this._cache.search, cacheKey);
     if (cached !== undefined) return cached;
 
-    const url = `${this.apiUrl}/shared/v2/movie/list?keyword=${encodeURIComponent(q)}&limit=48&page=1`;
+    const url = this.apiUrl + "/shared/v2/movie/list?keyword=" + encodeURIComponent(q) + "&limit=48&page=1";
     const data = this._fetchJson(url, this._headers(true));
     const movies = (data && data.result && data.result.movies) || [];
 
@@ -210,131 +375,127 @@ class AniCrush {
       return [];
     }
 
-    let matches = movies.map(movie => ({
-      id: String(movie.id || ""),
-      slug: String(movie.slug || ""),
-      title: this._clean(String(movie.name_english || movie.name || "")),
-      titleJP: this._clean(String(movie.name || "")),
-      normTitle: this._normalizeTitle(movie.name_english || movie.name || ""),
-      normTitleJP: this._normalizeTitle(movie.name || ""),
-      hasDub: !!movie.has_dub,
-      startDate: this._normalizeDate(movie.aired_from),
-      format: String((movie.type || "")).toUpperCase()
-    }));
+    let matches = movies.map((movie) => {
+      const en = this._clean(String(movie.name_english || movie.name || ""));
+      const jp = this._clean(String(movie.name || ""));
+      return {
+        id: String(movie.id || ""),
+        slug: String(movie.slug || ""),
+        title: en,
+        titleJP: jp,
+        normTitle: this._normalizeTitle(en),
+        normTitleJP: this._normalizeTitle(jp),
+        tokens: this._tokenizeTitle(en),
+        tokensJP: this._tokenizeTitle(jp),
+        hasDub: !!movie.has_dub,
+        startDate: this._normalizeDate(movie.aired_from),
+        format: String(movie.type || "").toUpperCase()
+      };
+    });
 
-    if (track === "dub") matches = matches.filter(m => m.hasDub);
+    if (track === "dub") matches = matches.filter((m) => m.hasDub);
 
-    const targetNormJP = this._normalizeTitle(media.romajiTitle || q);
-    const targetNorm = media.englishTitle ? this._normalizeTitle(media.englishTitle) : targetNormJP;
-    const targetFormat = String((media.format || "")).toUpperCase();
+    let filtered = matches.filter((m) => this._isStrongTitleMatch(m, targetNorm, targetNormJP, targetTokens, targetTokensJP));
 
-    const exactTitle = m => m.normTitle === targetNorm || m.normTitleJP === targetNormJP;
-    const looseTitle = m =>
-      this._levenshteinSimilarity(m.normTitle, targetNorm) > 0.8 ||
-      this._levenshteinSimilarity(m.normTitleJP, targetNormJP) > 0.8;
+    if (targetFormat) {
+      const byFormat = filtered.filter((m) => m.format === targetFormat);
+      if (byFormat.length) filtered = byFormat;
+    }
 
-    const dateYM = m => m.startDate && m.startDate.year === targetYear && m.startDate.month === targetMonth;
-    const dateY = m => m.startDate && m.startDate.year === targetYear;
-    const exactFormat = m => !targetFormat || m.format === targetFormat;
-
-    const tiers = [
-      m => exactTitle(m) && dateYM(m) && exactFormat(m),
-      m => exactTitle(m) && dateY(m) && exactFormat(m),
-      m => looseTitle(m) && dateYM(m) && exactFormat(m),
-      m => looseTitle(m) && dateY(m) && exactFormat(m)
-    ];
-
-    let filtered = [];
     if (targetYear) {
-      for (const tier of tiers) {
-        filtered = matches.filter(tier);
-        if (filtered.length) break;
-      }
+      const ym = filtered.filter((m) => this._sameYearMonth(m.startDate, targetYear, targetMonth));
+      const y = filtered.filter((m) => this._sameYear(m.startDate, targetYear));
+
+      if (ym.length) filtered = ym;
+      else if (y.length) filtered = y;
+    }
+
+    filtered = this._rankMatches(filtered, targetNorm, targetNormJP, targetTokens, targetTokensJP, targetYear, targetMonth, targetFormat);
+
+    if (!filtered.length && track !== "dub") {
+      const rankedAll = this._rankMatches(matches, targetNorm, targetNormJP, targetTokens, targetTokensJP, targetYear, targetMonth, targetFormat);
+      filtered = rankedAll.filter((m) => m._score >= 900);
     }
 
     if (!filtered.length) {
-      filtered = matches.filter(m => {
-        return (
-          m.normTitle === targetNorm ||
-          m.normTitleJP === targetNormJP ||
-          m.normTitle.includes(targetNorm) ||
-          targetNorm.includes(m.normTitle) ||
-          m.normTitleJP.includes(targetNormJP) ||
-          targetNormJP.includes(m.normTitleJP)
-        );
-      });
-      filtered.sort((a, b) => a.normTitle.length - b.normTitle.length);
+      this._cacheSet(this._cache.search, cacheKey, []);
+      return [];
     }
 
-    if (!filtered.length) filtered = matches;
-
-    const results = filtered.map(m => ({
-      id: `${m.id}/${track}`,
-      title: m.title,
-      jname: m.titleJP || "",
-      url: `${this.baseUrl}/detail/${m.slug}.${m.id}`,
-      subOrDub: track,
-      startDate: m.startDate
-    }));
+    const results = filtered.slice(0, 12).map((m) => {
+      return {
+        id: m.id + "/" + track,
+        title: m.title,
+        jname: m.titleJP || "",
+        url: this.baseUrl + "/detail/" + m.slug + "." + m.id,
+        subOrDub: track,
+        startDate: m.startDate
+      };
+    });
 
     this._cacheSet(this._cache.search, cacheKey, results);
     return results;
   }
 
   findEpisodes(Id) {
-    const [id, trackRaw] = String(Id || "").split("/");
+    const parts = String(Id || "").split("/");
+    const id = parts[0];
+    const trackRaw = parts[1];
     const track = trackRaw === "dub" ? "dub" : "sub";
+
     if (!id) return [];
 
-    const cacheKey = `${id}|${track}`;
+    const cacheKey = id + "|" + track;
     const cached = this._cacheGet(this._cache.episodes, cacheKey);
     if (cached !== undefined) return cached;
 
-    const url = `${this.apiUrl}/shared/v2/episode/list?_movieId=${id}`;
+    const url = this.apiUrl + "/shared/v2/episode/list?_movieId=" + id;
     const data = this._fetchJson(url, this._headers(true));
     const groups = (data && data.result) || {};
     const episodes = [];
 
-    for (const group of Object.values(groups)) {
+    const values = Object.values(groups);
+    for (let i = 0; i < values.length; i++) {
+      const group = values[i];
       if (!Array.isArray(group)) continue;
-      for (const ep of group) {
+
+      for (let j = 0; j < group.length; j++) {
+        const ep = group[j];
         const numRaw = ep.number !== undefined ? ep.number : ep.num;
         const num = parseFloat(numRaw);
         if (!isFinite(num)) continue;
 
         episodes.push({
-          id: `${id}/${track}`,
+          id: id + "/" + track,
           number: num,
-          title: this._clean(String(ep.name_english || ep.name || `Episode ${num}`)),
+          title: this._clean(String(ep.name_english || ep.name || ("Episode " + num))),
           url: ""
         });
       }
     }
 
-    episodes.sort((a, b) => a.number - b.number);
+    episodes.sort(function (a, b) { return a.number - b.number; });
     this._cacheSet(this._cache.episodes, cacheKey, episodes);
     return episodes;
   }
 
   checkDubForEpisode(arg) {
-    let obj = arg;
-    if (typeof arg === "string") {
-      try { obj = JSON.parse(arg); } catch (_) { obj = {}; }
-    }
+    const obj = this._parseArg(arg);
+    const animeIdRaw = String(obj.animeId || obj.id || "").trim();
+    const animeId = animeIdRaw.split("/")[0];
+    const episodeNumber = parseFloat(obj.episodeNumber !== undefined ? obj.episodeNumber : obj.number);
 
-    const animeId = String((obj && (obj.animeId || obj.id || obj.movieId)) || "").trim();
-    const episodeNumber = parseFloat(obj && (obj.episodeNumber ?? obj.number ?? obj.ep));
     if (!animeId || !isFinite(episodeNumber)) return false;
 
-    const cacheKey = `${animeId}|${episodeNumber}`;
+    const cacheKey = animeId + "|" + episodeNumber;
     const cached = this._cacheGet(this._cache.dubEp, cacheKey);
     if (cached !== undefined) return cached;
 
     try {
-      const eps = this.findEpisodes(`${animeId}/dub`);
-      const hasDub = Array.isArray(eps) && eps.some(ep => Number(ep.number) === episodeNumber);
-      this._cacheSet(this._cache.dubEp, cacheKey, hasDub);
-      return hasDub;
+      const eps = this.findEpisodes(animeId + "/dub");
+      const ok = eps.some(function (ep) { return Number(ep.number) === Number(episodeNumber); });
+      this._cacheSet(this._cache.dubEp, cacheKey, ok);
+      return ok;
     } catch (_) {
       this._cacheSet(this._cache.dubEp, cacheKey, false);
       return false;
@@ -362,18 +523,22 @@ class AniCrush {
     if (!isFinite(episodeNumber)) throw new Error("Missing episode number");
 
     const epParam = String(episodeNumber);
-    const cacheKey = `src:${id}:${epParam}:${sv}:${sc}`;
+    const cacheKey = "src:" + id + ":" + epParam + ":" + sv + ":" + sc;
     const cached = this._cacheGet(this._cache.servers, cacheKey);
     if (cached !== undefined) return cached;
 
-    const encUrl = `${this.apiUrl}/shared/v2/episode/sources?_movieId=${id}&ep=${epParam}&sv=${sv}&sc=${sc}`;
+    const encUrl = this.apiUrl + "/shared/v2/episode/sources?_movieId=" + id + "&ep=" + encodeURIComponent(epParam) + "&sv=" + sv + "&sc=" + sc;
     const json = this._fetchJson(encUrl, this._headers(true));
     const encryptedIframe = String((json && json.result && json.result.link) || "");
-    if (!encryptedIframe) throw new Error(`No embed link returned from server (sv=${sv}, sc=${sc})`);
+
+    if (!encryptedIframe) {
+      throw new Error("No embed link returned from server (sv=" + sv + ", sc=" + sc + ")");
+    }
 
     const resp = this._buildStreamResponse(encryptedIframe, serverName || "Southcloud-1");
+
     if (!this._looksPlayable(resp)) {
-      throw new Error(`Server sv=${sv} returned no playable video sources`);
+      throw new Error("Server sv=" + sv + " returned no playable video sources");
     }
 
     this._cacheSet(this._cache.servers, cacheKey, resp);
@@ -383,7 +548,9 @@ class AniCrush {
   _looksPlayable(resp) {
     const vs = resp && resp.videoSources;
     if (!Array.isArray(vs) || !vs.length) return false;
-    return vs.some(v => v && typeof v.url === "string" && v.url.length > 10);
+    return vs.some(function (v) {
+      return v && typeof v.url === "string" && v.url.length > 10;
+    });
   }
 
   _buildStreamResponse(embed, serverName) {
@@ -396,19 +563,21 @@ class AniCrush {
 
     const srcs = Array.isArray(decrypt.sources) ? decrypt.sources : [];
     const stream =
-      srcs.find(s => s && s.type === "hls" && s.file) ||
-      srcs.find(s => s && s.file);
+      srcs.find(function (s) { return s && s.type === "hls" && s.file; }) ||
+      srcs.find(function (s) { return s && s.file; });
 
     if (!stream || !stream.file) throw new Error("No stream file in embed response");
 
     const subs = (Array.isArray(decrypt.tracks) ? decrypt.tracks : [])
-      .filter(t => t && t.kind === "captions" && t.file)
-      .map((t, i) => ({
-        id: `sub-${i}`,
-        language: t.label || "Unknown",
-        url: t.file,
-        isDefault: !!t.default
-      }));
+      .filter(function (t) { return t && t.kind === "captions" && t.file; })
+      .map(function (t, i) {
+        return {
+          id: "sub-" + i,
+          language: t.label || "Unknown",
+          url: t.file,
+          isDefault: !!t.default
+        };
+      });
 
     return {
       server: serverName,
@@ -428,28 +597,29 @@ class AniCrush {
 
   _extractMega(url) {
     const u = new URL(url);
-    const base = `${u.protocol}//${u.host}/`;
+    const base = u.protocol + "//" + u.host + "/";
     const headers = {
       "Accept": "*/*",
       "X-Requested-With": "XMLHttpRequest",
       "Referer": base,
-      "Origin": `${u.protocol}//${u.host}`,
+      "Origin": u.protocol + "//" + u.host,
       "User-Agent": "Mozilla/5.0"
     };
 
     const html = this._fetchText(url, headers);
+
     const idM = html.match(/<title>\s*File\s*[#]?([a-zA-Z0-9]+)/i);
     if (!idM) throw new Error("File ID not found in embed page");
 
     let nonce = (html.match(/\b[a-zA-Z0-9]{48}\b/) || [])[0];
     if (!nonce) {
-      const parts = [...html.matchAll(/["']([A-Za-z0-9]{16})["']/g)];
+      const parts = Array.from(html.matchAll(/["']([A-Za-z0-9]{16})["']/g));
       if (parts.length >= 3) nonce = parts[0][1] + parts[1][1] + parts[2][1];
     }
     if (!nonce) throw new Error("Nonce not found in embed page");
 
     const data = this._fetchJson(
-      `${base}embed-2/v3/e-1/getSources?id=${idM[1]}&_k=${nonce}`,
+      base + "embed-2/v3/e-1/getSources?id=" + idM[1] + "&_k=" + nonce,
       headers
     );
 
@@ -458,7 +628,7 @@ class AniCrush {
       tracks: data.tracks || [],
       intro: data.intro || null,
       outro: data.outro || null,
-      headers
+      headers: headers
     };
   }
 }
