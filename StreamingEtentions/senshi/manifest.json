@@ -1,0 +1,10 @@
+{
+  "id": "senshi",
+  "name": "Senshi",
+  "version": "1.0.0",
+  "entry": "source.js",
+  "type": "anime-streaming",
+  "website": "https://senshi.live",
+  "supportsSub": true,
+  "supportsDub": true
+}
