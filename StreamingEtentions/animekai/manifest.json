@@ -1,7 +1,7 @@
 {
   "id": "animekai",
   "name": "AnimeKai",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "entry": "source.js",
   "type": "anime-streaming",
   "website": "https://animekai.to",
