@@ -1,10 +1,10 @@
 {
-  "id": "animekai",
-  "name": "AnimeKai",
-  "version": "1.0.1",
+  "id": "aniwatchtv",
+  "name": "AniWatchTV",
+  "version": "1.0.0",
   "entry": "source.js",
   "type": "anime-streaming",
-  "website": "https://animekai.to",
+  "website": "https://aniwatchtv.to",
   "supportsSub": true,
   "supportsDub": true
 }
