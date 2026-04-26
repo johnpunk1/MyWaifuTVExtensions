@@ -1,10 +1,17 @@
 {
   "id": "aniwatchtv",
   "name": "AniWatchTV",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "entry": "source.js",
   "type": "anime-streaming",
   "website": "https://aniwatchtv.to",
   "supportsSub": true,
-  "supportsDub": true
+  "supportsDub": true,
+  "supportsHls": true,
+  "supportsPlayback": true,
+  "episodeServers": [
+    "VidSrc",
+    "MegaCloud",
+    "T-Cloud"
+  ]
 }
