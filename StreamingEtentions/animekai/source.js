@@ -1,8 +1,10 @@
-class AniWatchTV {
+class AnimeKai {
   constructor() {
     this.type = "anime-streaming";
-    this.version = "1.0.1";
-    this.baseUrl = "https://aniwatchtv.to";
+    this.version = "1.0.2";
+    this.baseUrl = "https://animekai.to";
+    this.altBaseUrl = "https://anikai.to";
+    this.ua = "Mozilla/5.0 (Linux; Android 10; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
     this._cache = {
       search: new Map(),
       episodes: new Map(),
@@ -14,7 +16,7 @@ class AniWatchTV {
 
   getSettings() {
     return {
-      episodeServers: ["VidSrc", "MegaCloud", "T-Cloud"],
+      episodeServers: ["default", "Hard Sub", "Soft Sub", "Dub & S-Sub"],
       supportsSub: true,
       supportsDub: true,
       supportsHls: true,
@@ -50,12 +52,7 @@ class AniWatchTV {
 
   _nativeFetch(url, method, headers, body) {
     try {
-      var raw = Native.fetch(
-        String(url),
-        method || "GET",
-        JSON.stringify(headers || {}),
-        body == null ? "" : String(body)
-      );
+      var raw = Native.fetch(String(url), method || "GET", JSON.stringify(headers || {}), body == null ? "" : String(body));
       var j = {};
       try {
         j = JSON.parse(raw || "{}");
@@ -63,19 +60,40 @@ class AniWatchTV {
       return {
         ok: !!j.ok,
         status: Number(j.status || 0),
-        body: String(j.body || "")
+        headers: j.headers || {},
+        body: String(j.body || ""),
+        error: String(j.error || ""),
+        message: String(j.message || "")
       };
     } catch (e) {
-      return { ok: false, status: 0, body: "" };
+      return {
+        ok: false,
+        status: 0,
+        headers: {},
+        body: "",
+        error: "",
+        message: String(e && e.message || e || "")
+      };
     }
   }
 
+  _headers(extra) {
+    var h = {
+      "User-Agent": this.ua,
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8",
+      "X-Requested-With": "XMLHttpRequest"
+    };
+    extra = extra || {};
+    for (var k in extra) h[k] = extra[k];
+    return h;
+  }
+
   _fetchText(url, headers) {
-    return String(this._nativeFetch(url, "GET", headers || {}, "").body || "");
+    return String(this._nativeFetch(url, "GET", headers || this._headers(), "").body || "");
   }
 
   _fetchJson(url, headers) {
-    var txt = this._fetchText(url, headers).replace(/^\uFEFF/, "").trim();
+    var txt = this._fetchText(url, headers || this._headers()).replace(/^\uFEFF/, "").trim();
     if (!txt) return {};
     try {
       var o = JSON.parse(txt);
@@ -83,6 +101,40 @@ class AniWatchTV {
     } catch (_) {
       return {};
     }
+  }
+
+  _postJson(url, headers, body) {
+    var txt = String(this._nativeFetch(url, "POST", headers || this._headers({ "Content-Type": "application/json" }), body || "").body || "").replace(/^\uFEFF/, "").trim();
+    if (!txt) return {};
+    try {
+      var o = JSON.parse(txt);
+      return o && typeof o === "object" ? o : {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  _apiJson(path) {
+    var urls = [this.baseUrl + path, this.altBaseUrl + path];
+    for (var i = 0; i < urls.length; i++) {
+      var j = this._fetchJson(urls[i], this._headers({
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Referer": urls[i].replace(path, "/")
+      }));
+      if (j && Object.keys(j).length) return { json: j, base: urls[i].replace(path, "") };
+    }
+    return { json: {}, base: this.baseUrl };
+  }
+
+  _pageText(path) {
+    var urls = [this.baseUrl + path, this.altBaseUrl + path];
+    for (var i = 0; i < urls.length; i++) {
+      var txt = this._fetchText(urls[i], this._headers({
+        "Referer": urls[i].replace(path, "/")
+      }));
+      if (txt && txt.length > 100) return { text: txt, base: urls[i].replace(path, "") };
+    }
+    return { text: "", base: this.baseUrl };
   }
 
   _parseArg(arg) {
@@ -110,6 +162,9 @@ class AniWatchTV {
       .replace(/&#(\d+);?/g, function(_, d) {
         return String.fromCharCode(parseInt(d, 10));
       })
+      .replace(/&#x([0-9a-f]+);?/gi, function(_, d) {
+        return String.fromCharCode(parseInt(d, 16));
+      })
       .replace(/&quot;/g, '"')
       .replace(/&apos;/g, "'")
       .replace(/&#39;/g, "'")
@@ -118,18 +173,46 @@ class AniWatchTV {
       .replace(/&gt;/g, ">");
   }
 
+  _stripTags(s) {
+    return this._decodeHtml(String(s || "")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " "))
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   _normalize(title) {
     return String(title || "")
       .toLowerCase()
-      .replace(/(season|cour|part|the animation|the movie|movie)/g, "")
+      .replace(/(season|cour|part|the animation|the movie|movie|uncensored)/g, "")
       .replace(/\d+(st|nd|rd|th)/g, function(m) {
         return m.replace(/st|nd|rd|th/, "");
       })
-      .replace(/\bii\b/g, "2")
       .replace(/\biii\b/g, "3")
+      .replace(/\bii\b/g, "2")
       .replace(/\biv\b/g, "4")
       .replace(/\bv\b/g, "5")
       .replace(/[^a-z0-9]+/g, "");
+  }
+
+  _attrs(str) {
+    var out = {};
+    str = String(str || "");
+    var re = /([:\w-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g;
+    var m;
+    while ((m = re.exec(str)) !== null) {
+      out[String(m[1]).toLowerCase()] = this._decodeHtml(m[2] || m[3] || m[4] || "");
+    }
+    return out;
+  }
+
+  _slugTitle(id) {
+    var s = String(id || "").split("?")[0].split("#")[0];
+    s = s.replace(/-[a-z0-9]{3,8}$/i, "");
+    return s.replace(/-/g, " ").replace(/\b\w/g, function(c) {
+      return c.toUpperCase();
+    }).trim();
   }
 
   _prefixSim(a, b) {
@@ -140,9 +223,8 @@ class AniWatchTV {
 
     var shorter = a.length <= b.length ? a : b;
     var longer = a.length <= b.length ? b : a;
-    if (!shorter || !longer) return 0;
-
     var pfx = 0;
+
     while (pfx < shorter.length && shorter[pfx] === longer[pfx]) {
       pfx++;
     }
@@ -150,147 +232,117 @@ class AniWatchTV {
     return (pfx / shorter.length) * 0.7 + (shorter.length / longer.length) * 0.3;
   }
 
-  _levenSim(a, b) {
-    a = String(a || "");
-    b = String(b || "");
-    if (!a || !b) return 0;
-    if (a === b) return 1;
+  _scoreTitle(candidate, targets) {
+    var c = this._normalize(candidate);
+    if (!c) return 0;
 
-    var la = a.length;
-    var lb = b.length;
-    var dp = [];
+    var best = 0;
 
-    for (var i = 0; i <= la; i++) {
-      dp[i] = [];
-      for (var j = 0; j <= lb; j++) {
-        dp[i][j] = 0;
+    for (var i = 0; i < targets.length; i++) {
+      var t = this._normalize(targets[i]);
+      if (!t) continue;
+
+      if (c === t) {
+        best = Math.max(best, 1000);
+      } else if (c.indexOf(t) !== -1 || t.indexOf(c) !== -1) {
+        best = Math.max(best, 850);
+      } else {
+        best = Math.max(best, Math.floor(this._prefixSim(c, t) * 700));
       }
     }
 
-    for (var x = 0; x <= la; x++) dp[x][0] = x;
-    for (var y = 0; y <= lb; y++) dp[0][y] = y;
+    return best;
+  }
 
-    for (var r = 1; r <= la; r++) {
-      for (var c = 1; c <= lb; c++) {
-        if (a[r - 1] === b[c - 1]) {
-          dp[r][c] = dp[r - 1][c - 1];
-        } else {
-          dp[r][c] = 1 + Math.min(dp[r - 1][c], dp[r][c - 1], dp[r - 1][c - 1]);
-        }
-      }
+  _extractResultHtml(obj) {
+    if (!obj) return "";
+    if (typeof obj === "string") return obj;
+    if (obj.html) return String(obj.html || "");
+
+    if (obj.result) {
+      if (typeof obj.result === "string") return String(obj.result || "");
+      if (obj.result.html) return String(obj.result.html || "");
+      if (obj.result.result) return this._extractResultHtml(obj.result);
     }
 
-    return 1 - dp[la][lb] / Math.max(la, lb);
+    if (obj.data) return this._extractResultHtml(obj.data);
+
+    return "";
   }
 
-  _escapeRegex(str) {
-    return String(str || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-
-  _absoluteUrl(url) {
-    url = String(url || "");
-    if (!url) return "";
-    if (url.indexOf("http://") === 0 || url.indexOf("https://") === 0) return url;
-    if (url[0] === "/") return this.baseUrl + url;
-    return this.baseUrl + "/" + url;
-  }
-
-  _originFromUrl(url) {
-    var m = String(url || "").match(/^(https?:\/\/[^\/?#]+)/i);
-    return m ? m[1] : "";
-  }
-
-  _parseSuggestHtml(html) {
-    var results = [];
-    var monthMap = {
-      Jan: 1,
-      Feb: 2,
-      Mar: 3,
-      Apr: 4,
-      May: 5,
-      Jun: 6,
-      Jul: 7,
-      Aug: 8,
-      Sep: 9,
-      Oct: 10,
-      Nov: 11,
-      Dec: 12
-    };
-
-    var re = /<a\b[^>]*class="[^"]*\bnav-item\b[^"]*"[^>]*href="\/([^"]+)"[^>]*>([\s\S]*?)<\/a>|<a\b[^>]*href="\/([^"]+)"[^>]*class="[^"]*\bnav-item\b[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
+  _parseSearchResults(html, track, targets) {
+    var out = [];
+    var seen = {};
+    var itemRe = /<a\b([^>]*class=["'][^"']*\baitem\b[^"']*["'][^>]*)>([\s\S]*?)<\/a>/gi;
     var m;
 
-    while ((m = re.exec(html)) !== null) {
-      var pageUrl = m[1] || m[3] || "";
-      var block = m[2] || m[4] || "";
-      if (!pageUrl || pageUrl.indexOf("search?") === 0) continue;
+    while ((m = itemRe.exec(html)) !== null) {
+      var attrs = this._attrs(m[1]);
+      var href = attrs.href || "";
 
-      var jnameM = /data-jname="([^"]+)"/i.exec(block);
-      var titleM = /<h3\b[^>]*class="[^"]*\bfilm-name\b[^"]*"[^>]*>([\s\S]*?)<\/h3>/i.exec(block);
-      var dateM = /<span\b[^>]*>([^<]+)<\/span>/i.exec(block);
-      var fmtM = block.match(/<\/i>\s*([^<\s][^<]*?)\s*<i/i);
+      if (href.indexOf("/watch/") === -1) continue;
 
-      if (!titleM) continue;
+      var id = href.split("/watch/")[1].split("?")[0].replace(/^\/+|\/+$/g, "");
 
-      var jname = jnameM ? jnameM[1].trim() : "";
-      var title = titleM[1].replace(/<[^>]+>/g, "").trim();
-      var dateStr = dateM ? dateM[1].trim() : "";
-      var format = fmtM ? fmtM[1].trim().toUpperCase() : "";
+      if (!id || seen[id]) continue;
 
-      var startDate = { year: 0, month: 0, day: 0 };
-      var dm = dateStr.match(/([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})/);
+      var titleM = /class=["'][^"']*\btitle\b[^"']*["'][^>]*>([\s\S]*?)<\//i.exec(m[2]);
+      var imgM = /<img\b[^>]*(?:alt|title)=["']([^"']+)["']/i.exec(m[2]);
+      var title = titleM ? this._stripTags(titleM[1]) : imgM ? this._decodeHtml(imgM[1]) : attrs.title || this._slugTitle(id);
 
-      if (dm) {
-        startDate = {
-          year: parseInt(dm[3], 10),
-          month: monthMap[dm[1]] || 0,
-          day: parseInt(dm[2], 10)
-        };
-      }
+      if (!title || title.length > 120) title = this._slugTitle(id);
 
-      var idM = pageUrl.match(/-(\d+)(?=$|\?)/);
-      var id = idM ? idM[1] : pageUrl;
+      seen[id] = true;
 
-      results.push({
-        id: id,
-        pageUrl: pageUrl,
-        title: this._decodeHtml(title),
-        normTitle: this._normalize(this._decodeHtml(title)),
-        normTitleJP: this._normalize(this._decodeHtml(jname)),
-        startDate: startDate,
-        format: format
-      });
-    }
-
-    return results;
-  }
-
-  _parseSearchHtml(html) {
-    var results = [];
-    var re = /<a\b[^>]*href="\/([^"]+)"[^>]*title="([^"]+)"[^>]*data-id="(\d+)"[^>]*>/g;
-    var m;
-
-    while ((m = re.exec(html)) !== null) {
-      var pageUrl = m[1];
-      var title = this._decodeHtml(m[2]);
-      var id = m[3];
-
-      var aroundStart = Math.max(0, m.index - 500);
-      var aroundEnd = Math.min(html.length, m.index + 500);
-      var around = html.substring(aroundStart, aroundEnd);
-      var jnameM = /data-jname="([^"]+)"/i.exec(around);
-      var jname = jnameM ? this._decodeHtml(jnameM[1]) : "";
-
-      results.push({
-        id: id,
-        pageUrl: pageUrl,
+      out.push({
+        id: id + "/" + track,
         title: title,
-        normTitle: this._normalize(title),
-        normTitleJP: this._normalize(jname)
+        jname: "",
+        url: this.baseUrl + "/watch/" + id,
+        subOrDub: track,
+        _score: this._scoreTitle(title, targets)
       });
     }
 
-    return results;
+    var anchorRe = /<a\b([^>]*href=["']\/watch\/([^"']+)["'][^>]*)>([\s\S]*?)<\/a>/gi;
+
+    while ((m = anchorRe.exec(html)) !== null) {
+      var id2 = String(m[2] || "").split("?")[0].replace(/^\/+|\/+$/g, "");
+
+      if (!id2 || seen[id2]) continue;
+
+      var attrs2 = this._attrs(m[1]);
+      var txt = this._stripTags(m[3]);
+      var title2 = attrs2.title || attrs2["data-title"] || txt || this._slugTitle(id2);
+
+      if (!title2 || title2.length > 120 || title2.toLowerCase() === "watch") {
+        title2 = this._slugTitle(id2);
+      }
+
+      var score = this._scoreTitle(title2, targets);
+
+      if (score < 250 && out.length > 0) continue;
+
+      seen[id2] = true;
+
+      out.push({
+        id: id2 + "/" + track,
+        title: title2,
+        jname: "",
+        url: this.baseUrl + "/watch/" + id2,
+        subOrDub: track,
+        _score: score
+      });
+    }
+
+    out.sort(function(a, b) {
+      return b._score - a._score;
+    });
+
+    return out.map(function(x) {
+      delete x._score;
+      return x;
+    });
   }
 
   search(arg) {
@@ -301,212 +353,155 @@ class AniWatchTV {
 
     var track = this._getTrack(arg);
     var media = arg.media || {};
-    var start = media.startDate || {};
+    var targets = [];
 
-    var targetYear = parseInt(start.year, 10) || 0;
-    var targetMonth = parseInt(start.month, 10) || 0;
-    var targetFormat = String(media.format || "").toUpperCase();
+    if (media.englishTitle) targets.push(media.englishTitle);
+    if (media.romajiTitle) targets.push(media.romajiTitle);
+    if (media.nativeTitle) targets.push(media.nativeTitle);
 
-    var targetNormJP = this._normalize(media.romajiTitle || media.nativeTitle || q);
-    var targetNorm = media.englishTitle ? this._normalize(media.englishTitle) : targetNormJP;
+    if (Array.isArray(media.altTitles)) {
+      for (var i = 0; i < media.altTitles.length; i++) {
+        targets.push(media.altTitles[i]);
+      }
+    }
 
-    var cacheKey = [
-      q,
-      track,
-      targetYear,
-      targetMonth,
-      targetFormat,
-      targetNorm,
-      targetNormJP
-    ].join("|");
+    targets.push(q);
 
+    var cacheKey = q + "|" + track + "|" + targets.join("|");
     var cached = this._cacheGet(this._cache.search, cacheKey);
+
     if (cached !== undefined) return cached;
 
-    var ajaxHeaders = {
-      "Accept": "application/json, text/javascript, */*; q=0.01",
-      "X-Requested-With": "XMLHttpRequest",
-      "User-Agent": "Mozilla/5.0"
-    };
-
-    var self = this;
-
-    var exactTitle = function(m) {
-      return m.normTitle === targetNorm || m.normTitleJP === targetNormJP;
-    };
-
-    var looseTitle = function(m) {
-      return self._prefixSim(m.normTitle, targetNorm) > 0.8 ||
-        self._prefixSim(m.normTitleJP, targetNormJP) > 0.8 ||
-        self._levenSim(m.normTitle, targetNorm) > 0.8 ||
-        self._levenSim(m.normTitleJP, targetNormJP) > 0.8;
-    };
-
-    var looserTitle = function(m) {
-      return m.normTitle.indexOf(targetNorm) !== -1 ||
-        m.normTitleJP.indexOf(targetNormJP) !== -1 ||
-        targetNorm.indexOf(m.normTitle) !== -1 ||
-        targetNormJP.indexOf(m.normTitleJP) !== -1 ||
-        self._prefixSim(m.normTitle, targetNorm) > 0.6 ||
-        self._prefixSim(m.normTitleJP, targetNormJP) > 0.6;
-    };
-
-    var dateYM = function(m) {
-      return targetYear > 0 && targetMonth > 0 && m.startDate && m.startDate.year === targetYear && m.startDate.month === targetMonth;
-    };
-
-    var dateY = function(m) {
-      return targetYear > 0 && m.startDate && m.startDate.year === targetYear;
-    };
-
-    var exactFmt = function(m) {
-      if (!targetFormat) return true;
-      if (!m.format) return true;
-      return m.format === targetFormat;
-    };
-
-    var tiers = [
-      function(m) { return exactTitle(m) && dateYM(m) && exactFmt(m); },
-      function(m) { return exactTitle(m) && dateY(m) && exactFmt(m); },
-      function(m) { return looseTitle(m) && dateYM(m) && exactFmt(m); },
-      function(m) { return looseTitle(m) && dateY(m) && exactFmt(m); },
-      function(m) { return exactTitle(m) && exactFmt(m); },
-      function(m) { return looseTitle(m) && exactFmt(m); },
-      function(m) { return looserTitle(m); }
+    var paths = [
+      "/ajax/anime/search?keyword=" + encodeURIComponent(q),
+      "/ajax/search?keyword=" + encodeURIComponent(q),
+      "/browser?keyword=" + encodeURIComponent(q)
     ];
 
-    var filtered = [];
-    var allMatches = [];
-    var baseUrl = this.baseUrl + "/ajax/search/suggest?keyword=" + encodeURIComponent(q);
+    var results = [];
 
-    for (var page = 1; page <= 7; page++) {
-      var pageUrl = page === 1 ? baseUrl : baseUrl + "&page=" + page;
-      var res = this._fetchJson(pageUrl, ajaxHeaders);
-      var html = String(res.html || "");
-      if (!html) break;
+    for (var p = 0; p < paths.length; p++) {
+      if (paths[p].indexOf("/ajax/") === 0) {
+        var api = this._apiJson(paths[p]);
+        var html = this._extractResultHtml(api.json);
 
-      var pageMatches = this._parseSuggestHtml(html);
-      if (!pageMatches.length) break;
+        if (html) results = this._parseSearchResults(html, track, targets);
+      } else {
+        var page = this._pageText(paths[p]);
 
-      for (var p = 0; p < pageMatches.length; p++) {
-        allMatches.push(pageMatches[p]);
+        if (page.text) results = this._parseSearchResults(page.text, track, targets);
       }
 
-      var hasLoose = false;
-      for (var i = 0; i < pageMatches.length; i++) {
-        if (looserTitle(pageMatches[i])) {
-          hasLoose = true;
-          break;
-        }
-      }
-
-      if (!hasLoose && page > 1) break;
+      if (results.length) break;
     }
-
-    for (var t = 0; t < tiers.length; t++) {
-      filtered = allMatches.filter(tiers[t]);
-      if (filtered.length) break;
-    }
-
-    if (!filtered.length || !targetYear) {
-      var searchUrl = this.baseUrl + "/search?keyword=" + encodeURIComponent(q);
-      var searchHtml = this._fetchText(searchUrl, {
-        "User-Agent": "Mozilla/5.0"
-      });
-
-      var searchMatches = this._parseSearchHtml(searchHtml);
-      var normQ = this._normalize(q);
-
-      filtered = searchMatches.filter(function(m) {
-        return m.normTitle === normQ ||
-          m.normTitleJP === normQ ||
-          m.normTitle.indexOf(normQ) !== -1 ||
-          m.normTitleJP.indexOf(normQ) !== -1 ||
-          normQ.indexOf(m.normTitle) !== -1 ||
-          normQ.indexOf(m.normTitleJP) !== -1 ||
-          self._prefixSim(m.normTitle, normQ) > 0.5 ||
-          self._prefixSim(m.normTitleJP, normQ) > 0.5 ||
-          self._levenSim(m.normTitle, normQ) > 0.5 ||
-          self._levenSim(m.normTitleJP, normQ) > 0.5;
-      });
-
-      filtered.sort(function(a, b) {
-        if (a.normTitle.length !== b.normTitle.length) {
-          return a.normTitle.length - b.normTitle.length;
-        }
-        return a.normTitle < b.normTitle ? -1 : a.normTitle > b.normTitle ? 1 : 0;
-      });
-    }
-
-    var baseUrl2 = this.baseUrl;
-
-    var results = filtered.map(function(m) {
-      return {
-        id: m.id + "/" + track,
-        title: m.title,
-        url: baseUrl2 + "/" + m.pageUrl,
-        subOrDub: track
-      };
-    });
 
     this._cacheSet(this._cache.search, cacheKey, results);
     return results;
   }
 
-  findEpisodes(Id) {
-    var parts = String(Id || "").split("/");
-    var id = parts[0];
-    var track = parts[1] === "dub" ? "dub" : "sub";
+  _parseMediaId(mediaId) {
+    var raw = String(mediaId || "").trim();
+    var track = raw.toLowerCase().endsWith("/dub") ? "dub" : "sub";
 
-    if (!id) return [];
+    raw = raw.replace(/\/(sub|dub)$/i, "");
 
-    var cacheKey = id + "|" + track;
-    var cached = this._cacheGet(this._cache.episodes, cacheKey);
-    if (cached !== undefined) return cached;
+    return {
+      id: raw,
+      track: track
+    };
+  }
 
-    var res = this._fetchJson(this.baseUrl + "/ajax/v2/episode/list/" + id, {
-      "Accept": "application/json, text/javascript, */*; q=0.01",
-      "X-Requested-With": "XMLHttpRequest",
-      "User-Agent": "Mozilla/5.0"
-    });
+  _encdec(s, mode) {
+    var endpoint = mode === "d" ? "dec-kai" : "enc-kai";
+    var url = "https://enc-dec.app/api/" + endpoint + "?text=" + encodeURIComponent(String(s || ""));
+    var json = this._fetchJson(url, this._headers({
+      "Accept": "application/json, text/plain, */*",
+      "Referer": "https://enc-dec.app/"
+    }));
 
-    var html = String(res.html || "");
-    if (!html) return [];
+    return json && json.result !== undefined ? json.result : "";
+  }
 
-    var episodes = [];
-    var re = /<a\b[^>]*class="[^"]*\bep-item\b[^"]*"[^>]*data-number="([^"]+)"[^>]*data-id="([^"]+)"[^>]*href="([^"]+)"[\s\S]*?<div\b[^>]*class="[^"]*\bep-name\b[^"]*"[^>]*title="([^"]+)"/g;
+  _extractBookmarkId(html) {
+    var m = /class=["'][^"']*\buser-bookmark\b[^"']*["'][^>]*data-id=["']([^"']+)["']/i.exec(html) ||
+      /data-id=["']([^"']+)["'][^>]*class=["'][^"']*\buser-bookmark\b/i.exec(html);
+
+    return m ? m[1] : "";
+  }
+
+  _parseEpisodesHtml(html, mediaId, track) {
+    var out = [];
+    var seen = {};
+    var re = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
     var m;
 
     while ((m = re.exec(html)) !== null) {
-      episodes.push({
-        id: String(m[2]) + "/" + track,
-        number: parseFloat(m[1]) || episodes.length + 1,
-        url: this._absoluteUrl(m[3]),
-        title: this._decodeHtml(m[4])
+      var attrs = this._attrs(m[1]);
+      var token = attrs.token || attrs["data-token"] || "";
+      var num = attrs.num || attrs["data-num"] || attrs["data-number"] || "";
+
+      if (!token || !num) continue;
+      if (seen[token]) continue;
+
+      seen[token] = true;
+
+      var n = parseFloat(num);
+
+      if (!isFinite(n)) n = out.length + 1;
+
+      var titleM = /<span\b[^>]*>([\s\S]*?)<\/span>/i.exec(m[2]);
+      var title = titleM ? this._stripTags(titleM[1]) : this._stripTags(m[2]);
+
+      out.push({
+        id: mediaId + "|" + token + "/" + track,
+        number: n,
+        url: this.baseUrl + "/watch/" + mediaId + "?ep=" + n,
+        title: title || "Episode " + n
       });
     }
 
-    if (!episodes.length) {
-      var re2 = /<a\b[^>]*data-id="([^"]+)"[^>]*data-number="([^"]+)"[^>]*href="([^"]+)"[^>]*class="[^"]*\bep-item\b[^"]*"[\s\S]*?title="([^"]+)"/g;
-      while ((m = re2.exec(html)) !== null) {
-        episodes.push({
-          id: String(m[1]) + "/" + track,
-          number: parseFloat(m[2]) || episodes.length + 1,
-          url: this._absoluteUrl(m[3]),
-          title: this._decodeHtml(m[4])
-        });
-      }
-    }
-
-    episodes.sort(function(a, b) {
+    out.sort(function(a, b) {
       return a.number - b.number;
     });
+
+    return out;
+  }
+
+  findEpisodes(Id) {
+    var parsed = this._parseMediaId(Id);
+    var mediaId = parsed.id;
+    var track = parsed.track;
+
+    if (!mediaId) return [];
+
+    var cacheKey = mediaId + "|" + track;
+    var cached = this._cacheGet(this._cache.episodes, cacheKey);
+
+    if (cached !== undefined) return cached;
+
+    var page = this._pageText("/watch/" + mediaId);
+    var html = page.text;
+
+    if (!html) return [];
+
+    var bookmarkId = this._extractBookmarkId(html);
+    var episodes = this._parseEpisodesHtml(html, mediaId, track);
+
+    if (!episodes.length && bookmarkId) {
+      var encId = this._encdec(bookmarkId, "e");
+
+      if (encId) {
+        var api = this._apiJson("/ajax/episodes/list?ani_id=" + encodeURIComponent(bookmarkId) + "&_=" + encodeURIComponent(encId));
+        var epHtml = this._extractResultHtml(api.json);
+        episodes = this._parseEpisodesHtml(epHtml, mediaId, track);
+      }
+    }
 
     this._cacheSet(this._cache.episodes, cacheKey, episodes);
     return episodes;
   }
 
-  findEpisodeServer(episodeObj, serverName) {
+  _parseEpisodeObj(episodeObj) {
     var ep = episodeObj;
 
     if (typeof episodeObj === "string") {
@@ -517,196 +512,151 @@ class AniWatchTV {
       }
     }
 
-    var rawId = String((ep && ep.id) || "");
-    var parts = rawId.split("/");
-    var id = parts[0];
-    var track = parts[1] === "dub" ? "dub" : "sub";
+    var raw = String((ep && ep.id) || "").trim();
+    var track = raw.toLowerCase().endsWith("/dub") ? "dub" : "sub";
 
-    if (!id) throw new Error("Missing episode id");
+    raw = raw.replace(/\/(sub|dub)$/i, "");
 
-    var server = serverName && serverName !== "default" ? String(serverName) : "VidSrc";
-    var allowedTypes = track === "sub" ? ["sub", "raw"] : ["dub"];
-    var cacheKey = "srv:" + id + ":" + track + ":" + server;
+    var parts = raw.split("|");
 
-    var cached = this._cacheGet(this._cache.servers, cacheKey);
-    if (cached !== undefined) return cached;
-
-    var ajaxHeaders = {
-      "Accept": "application/json, text/javascript, */*; q=0.01",
-      "X-Requested-With": "XMLHttpRequest",
-      "User-Agent": "Mozilla/5.0"
+    return {
+      mediaId: parts[0] || "",
+      token: parts[1] || parts[0] || "",
+      track: track,
+      number: ep && ep.number
     };
+  }
 
-    var serverRes = this._fetchJson(this.baseUrl + "/ajax/v2/episode/servers?episodeId=" + encodeURIComponent(id), ajaxHeaders);
-    var serverHtml = String(serverRes.html || "");
+  _typeSuffix(type) {
+    type = String(type || "").toLowerCase();
 
-    if (!serverHtml) throw new Error("No server HTML returned");
+    if (type === "sub") return "Hard Sub";
+    if (type === "softsub") return "Soft Sub";
+    if (type === "dub") return "Dub & S-Sub";
 
-    var serverId = "";
-    var serverLower = server.toLowerCase();
-    var itemRe = /<div\b[^>]*class="[^"]*\bserver-item\b[^"]*"[^>]*>[\s\S]*?<\/div>/gi;
-    var item;
+    return type || "Unknown";
+  }
 
-    while ((item = itemRe.exec(serverHtml)) !== null) {
-      var block = item[0];
-      var typeM = /data-type="([^"]+)"/i.exec(block);
-      var idM = /data-id="([^"]+)"/i.exec(block);
-      var nameM = /<a\b[^>]*>\s*([\s\S]*?)\s*<\/a>/i.exec(block);
+  _parseServersHtml(html) {
+    var out = [];
+    var re = /<([a-z0-9]+)\b([^>]*class=["'][^"']*\bserver\b[^"']*["'][^>]*)>([\s\S]*?)<\/\1>/gi;
+    var m;
 
-      if (!typeM || !idM || !nameM) continue;
+    while ((m = re.exec(html)) !== null) {
+      var attrs = this._attrs(m[2]);
+      var lid = attrs["data-lid"] || attrs.lid || attrs.id || "";
 
-      var type = String(typeM[1] || "").toLowerCase();
-      var name = this._decodeHtml(nameM[1].replace(/<[^>]+>/g, "").trim()).toLowerCase();
+      if (!lid) continue;
 
-      var typeOk = false;
-      for (var i = 0; i < allowedTypes.length; i++) {
-        if (type === allowedTypes[i]) {
-          typeOk = true;
-          break;
-        }
+      var before = html.substring(Math.max(0, m.index - 1500), m.index);
+      var type = "";
+      var tRe = /data-id=["'](sub|softsub|dub)["']/gi;
+      var tm;
+
+      while ((tm = tRe.exec(before)) !== null) {
+        type = tm[1];
       }
 
-      if (typeOk && name === serverLower) {
-        serverId = idM[1];
-        break;
-      }
+      var text = this._stripTags(m[3]);
+
+      out.push({
+        lid: lid,
+        type: type,
+        name: text || "Server",
+        label: this._typeSuffix(type) + " - " + (text || "Server")
+      });
     }
 
-    if (!serverId) {
-      var looseRe = new RegExp(
-        '<div\\b[^>]*class="[^"]*\\bserver-item\\b[^"]*"[^>]*data-type="(' +
-          allowedTypes.join("|") +
-          ')"[^>]*data-id="([^"]+)"[^>]*>[\\s\\S]*?<a\\b[^>]*>\\s*' +
-          this._escapeRegex(server) +
-          '\\s*<\\/a>',
-        "i"
-      );
+    return out;
+  }
 
-      var serverMatch = looseRe.exec(serverHtml);
-      if (serverMatch) serverId = serverMatch[2];
-    }
+  _chooseServer(servers, serverName, track) {
+    if (!servers || !servers.length) return null;
 
-    if (!serverId) {
-      throw new Error('Server "' + server + '" not found for track ' + track);
-    }
+    var want = String(serverName || "").toLowerCase();
+    var preferredTypes = track === "dub" ? ["dub"] : ["sub", "softsub"];
 
-    var sourcesRes = this._fetchJson(this.baseUrl + "/ajax/v2/episode/sources?id=" + encodeURIComponent(serverId), ajaxHeaders);
-    var embedUrl = String(sourcesRes.link || "");
+    if (want && want !== "default") {
+      for (var i = 0; i < servers.length; i++) {
+        var full = String(servers[i].label || servers[i].name || "").toLowerCase();
 
-    if (!embedUrl) throw new Error("No embed link returned");
-
-    var decryptData = this._extractMegaCloud(embedUrl);
-
-    if (!decryptData || !decryptData.sources || !decryptData.sources.length) {
-      var fallbackRes = this._fetchJson(
-        "https://ac-api.ofchaos.com/api/anime/embed/convert/v2?embedUrl=" + encodeURIComponent(embedUrl),
-        { "User-Agent": "Mozilla/5.0" }
-      );
-
-      if (fallbackRes && fallbackRes.sources) {
-        decryptData = fallbackRes;
+        if (full === want || full.indexOf(want) !== -1) return servers[i];
       }
     }
 
-    if (!decryptData || !decryptData.sources || !decryptData.sources.length) {
-      throw new Error("No sources from extractor");
-    }
-
-    var stream = null;
-
-    for (var s = 0; s < decryptData.sources.length; s++) {
-      if (decryptData.sources[s] && decryptData.sources[s].type === "hls" && decryptData.sources[s].file) {
-        stream = decryptData.sources[s];
-        break;
+    for (var t = 0; t < preferredTypes.length; t++) {
+      for (var j = 0; j < servers.length; j++) {
+        if (servers[j].type === preferredTypes[t]) return servers[j];
       }
     }
 
-    if (!stream) {
-      for (var s2 = 0; s2 < decryptData.sources.length; s2++) {
-        if (decryptData.sources[s2] && decryptData.sources[s2].file) {
-          stream = decryptData.sources[s2];
-          break;
-        }
+    return servers[0];
+  }
+
+  _originFromUrl(url) {
+    var m = String(url || "").match(/^(https?:\/\/[^\/?#]+)/i);
+    return m ? m[1] : "";
+  }
+
+  _searchParam(url, key) {
+    var q = String(url || "").split("?")[1] || "";
+    q = q.split("#")[0];
+
+    var parts = q.split("&");
+
+    for (var i = 0; i < parts.length; i++) {
+      var kv = parts[i].split("=");
+
+      if (decodeURIComponent(kv[0] || "") === key) {
+        return decodeURIComponent(kv.slice(1).join("=") || "");
       }
     }
 
-    if (!stream || !stream.file) {
-      throw new Error("No valid stream file found");
+    return "";
+  }
+
+  _normalizeTracks(tracks) {
+    var out = [];
+
+    if (!Array.isArray(tracks)) return out;
+
+    for (var i = 0; i < tracks.length; i++) {
+      var t = tracks[i] || {};
+      var file = t.file || t.url || "";
+
+      if (!file) continue;
+
+      var kind = String(t.kind || "captions").toLowerCase();
+
+      if (kind === "thumbnails") continue;
+
+      out.push({
+        id: "sub-" + i,
+        language: t.label || t.lang || t.language || "Unknown",
+        url: file,
+        isDefault: !!t.default
+      });
     }
 
-    var subtitles = [];
-    var tracks = decryptData.tracks || [];
-
-    for (var tr = 0; tr < tracks.length; tr++) {
-      var t = tracks[tr];
-      if (t && t.kind === "captions" && t.file) {
-        subtitles.push({
-          id: "sub-" + tr,
-          language: t.label || "Unknown",
-          url: t.file,
-          isDefault: !!t.default
-        });
-      }
-    }
-
-    var origin = this._originFromUrl(embedUrl) || "https://megacloud.club";
-    var type = stream.type === "hls" || String(stream.file).indexOf(".m3u8") !== -1 ? "m3u8" : "mp4";
-
-    var resp = {
-      server: server,
-      headers: {
-        "Referer": origin + "/",
-        "Origin": origin,
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
-      },
-      videoSources: [
-        {
-          url: stream.file,
-          file: stream.file,
-          type: type,
-          quality: "auto",
-          subtitles: subtitles
-        }
-      ],
-      sources: [
-        {
-          url: stream.file,
-          file: stream.file,
-          type: type,
-          quality: "auto"
-        }
-      ],
-      subtitles: subtitles
-    };
-
-    this._cacheSet(this._cache.servers, cacheKey, resp);
-    return resp;
+    return out;
   }
 
   _extractMegaCloud(embedUrl) {
     try {
       var origin = this._originFromUrl(embedUrl);
+
       if (!origin) return null;
 
-      var base = origin + "/";
-      var embedHeaders = {
+      var headers = this._headers({
         "Accept": "*/*",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": base,
-        "Origin": origin,
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
-      };
+        "Referer": origin + "/",
+        "Origin": origin
+      });
 
-      var html = this._fetchText(embedUrl, embedHeaders);
+      var html = this._fetchText(embedUrl, headers);
+
       if (!html) return null;
 
-      var fileIdM = html.match(/<title>\s*File\s+#([a-zA-Z0-9]+)\s*-/i) ||
-        html.match(/\/embed-2\/v\d+\/e-\d+\/([a-zA-Z0-9]+)/i) ||
-        html.match(/data-id="([a-zA-Z0-9]+)"/i);
-
-      if (!fileIdM) return null;
-
-      var fileId = fileIdM[1];
       var nonce = null;
       var m48 = html.match(/\b[a-zA-Z0-9]{48}\b/);
 
@@ -726,30 +676,234 @@ class AniWatchTV {
         }
       }
 
-      if (!nonce) return null;
+      var idM = embedUrl.match(/\/e-\d+\/([^\/?#]+)/i) ||
+        html.match(/<title>\s*File\s*#?([a-zA-Z0-9]+)\s*-/i) ||
+        html.match(/data-id=["']([a-zA-Z0-9]+)["']/i);
 
-      var data = this._fetchJson(
-        base + "embed-2/v3/e-1/getSources?id=" + encodeURIComponent(fileId) + "&_k=" + encodeURIComponent(nonce),
-        embedHeaders
-      );
+      if (!nonce || !idM) return null;
+
+      var sid = idM[1];
+      var data = this._fetchJson(origin + "/embed-2/v3/e-1/getSources?id=" + encodeURIComponent(sid) + "&_k=" + encodeURIComponent(nonce), headers);
+
+      if (data && data.sources && data.sources.length && data.sources[0].file && (!data.encrypted || String(data.sources[0].file).indexOf(".m3u8") !== -1)) {
+        return {
+          sources: data.sources,
+          tracks: data.tracks || [],
+          referer: origin + "/"
+        };
+      }
+
+      var fallback = this._fetchJson("https://ac-api.ofchaos.com/api/anime/embed/convert/v2?embedUrl=" + encodeURIComponent(embedUrl), this._headers({
+        "Accept": "application/json"
+      }));
+
+      if (fallback && fallback.sources && fallback.sources.length) return fallback;
+
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  _extractMegaUp(embedUrl) {
+    try {
+      var origin = this._originFromUrl(embedUrl);
+      var mediaUrl = String(embedUrl).replace("/e/", "/media/");
+      var media = this._fetchJson(mediaUrl, this._headers({
+        "Accept": "application/json, text/plain, */*",
+        "Referer": origin + "/",
+        "Origin": origin
+      }));
+
+      var token = media.result || media.data || media.token || "";
+
+      if (!token) return null;
+
+      var decType = embedUrl.indexOf("://rapid") !== -1 ? "rapid" : "mega";
+      var dec = this._postJson("https://enc-dec.app/api/dec-" + decType, {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": this.ua,
+        "Referer": "https://enc-dec.app/"
+      }, JSON.stringify({
+        text: token,
+        agent: this.ua
+      }));
+
+      var result = dec.result || dec;
+
+      if (typeof result === "string") {
+        try {
+          result = JSON.parse(result);
+        } catch (_) {}
+      }
+
+      if (!result || !result.sources || !result.sources.length) return null;
+
+      var subList = this._searchParam(embedUrl, "sub.list");
+
+      if (subList) {
+        var subJson = this._fetchJson(subList, this._headers({
+          "Accept": "*/*",
+          "Referer": origin + "/",
+          "Origin": origin
+        }));
+
+        if (Array.isArray(subJson)) result.tracks = subJson;
+      }
 
       return {
-        sources: data.sources || [],
-        tracks: data.tracks || [],
-        intro: data.intro || null,
-        outro: data.outro || null
+        sources: result.sources,
+        tracks: result.tracks || [],
+        referer: origin + "/"
       };
     } catch (e) {
       return null;
     }
   }
 
+  _extractEmbed(embedUrl) {
+    var host = String(embedUrl || "").match(/^https?:\/\/([^\/?#]+)/i);
+    host = host ? host[1].toLowerCase() : "";
+
+    if (!host) return null;
+
+    if (host.indexOf("megacloud") !== -1 || String(embedUrl).indexOf("/embed-2/") !== -1) {
+      return this._extractMegaCloud(embedUrl);
+    }
+
+    if (/^(4spromax|megaup|rapidairmax|rapidshare)(\d+)?\.?/.test(host) || host.indexOf("megaup") !== -1 || host.indexOf("rapid") !== -1) {
+      return this._extractMegaUp(embedUrl);
+    }
+
+    var fallback = this._fetchJson("https://ac-api.ofchaos.com/api/anime/embed/convert/v2?embedUrl=" + encodeURIComponent(embedUrl), this._headers({
+      "Accept": "application/json"
+    }));
+
+    if (fallback && fallback.sources && fallback.sources.length) return fallback;
+
+    return null;
+  }
+
+  findEpisodeServer(episodeObj, serverName) {
+    var ep = this._parseEpisodeObj(episodeObj);
+
+    if (!ep.token) throw new Error("Missing episode token");
+
+    var cacheKey = "srv:" + ep.token + ":" + ep.track + ":" + String(serverName || "default");
+    var cached = this._cacheGet(this._cache.servers, cacheKey);
+
+    if (cached !== undefined) return cached;
+
+    var encToken = this._encdec(ep.token, "e");
+
+    if (!encToken) throw new Error("Could not encode episode token");
+
+    var listApi = this._apiJson("/ajax/links/list?token=" + encodeURIComponent(ep.token) + "&_=" + encodeURIComponent(encToken));
+    var serversHtml = this._extractResultHtml(listApi.json);
+    var servers = this._parseServersHtml(serversHtml);
+
+    if (!servers.length) throw new Error("No servers returned");
+
+    var chosen = this._chooseServer(servers, serverName, ep.track);
+
+    if (!chosen || !chosen.lid) throw new Error("No matching server");
+
+    var encLid = this._encdec(chosen.lid, "e");
+
+    if (!encLid) throw new Error("Could not encode server id");
+
+    var viewApi = this._apiJson("/ajax/links/view?id=" + encodeURIComponent(chosen.lid) + "&_=" + encodeURIComponent(encLid));
+    var encResult = viewApi.json && viewApi.json.result !== undefined ? viewApi.json.result : "";
+
+    if (!encResult) throw new Error("No server link result");
+
+    var dec = this._encdec(encResult, "d");
+
+    if (typeof dec === "string") {
+      try {
+        dec = JSON.parse(dec);
+      } catch (_) {}
+    }
+
+    var embedUrl = typeof dec === "string" ? dec : dec && dec.url ? dec.url : "";
+
+    if (!embedUrl) throw new Error("No embed url");
+
+    var extracted = this._extractEmbed(embedUrl);
+
+    if (!extracted || !extracted.sources || !extracted.sources.length) {
+      throw new Error("No extracted sources");
+    }
+
+    var stream = null;
+
+    for (var i = 0; i < extracted.sources.length; i++) {
+      var s = extracted.sources[i] || {};
+      var file = s.file || s.url || "";
+
+      if (file && (s.type === "hls" || String(file).indexOf(".m3u8") !== -1)) {
+        stream = s;
+        break;
+      }
+    }
+
+    if (!stream) {
+      for (var j = 0; j < extracted.sources.length; j++) {
+        var s2 = extracted.sources[j] || {};
+
+        if (s2.file || s2.url) {
+          stream = s2;
+          break;
+        }
+      }
+    }
+
+    if (!stream) throw new Error("No playable source");
+
+    var url = stream.file || stream.url;
+    var origin = this._originFromUrl(embedUrl);
+    var subtitles = this._normalizeTracks(extracted.tracks || []);
+    var type = String(url).indexOf(".mpd") !== -1 ? "mpd" : String(url).indexOf(".m3u8") !== -1 || stream.type === "hls" ? "m3u8" : "mp4";
+
+    var resp = {
+      server: chosen.label || chosen.name || "default",
+      headers: {
+        "Referer": extracted.referer || origin + "/",
+        "Origin": origin,
+        "User-Agent": this.ua
+      },
+      videoSources: [
+        {
+          url: url,
+          file: url,
+          type: type,
+          quality: stream.quality || "auto",
+          subtitles: subtitles
+        }
+      ],
+      sources: [
+        {
+          url: url,
+          file: url,
+          type: type,
+          quality: stream.quality || "auto"
+        }
+      ],
+      subtitles: subtitles
+    };
+
+    this._cacheSet(this._cache.servers, cacheKey, resp);
+    return resp;
+  }
+
   _looksPlayable(resp) {
-    var vs = resp && resp.videoSources;
+    var vs = resp && (resp.videoSources || resp.sources);
+
     if (!Array.isArray(vs) || !vs.length) return false;
 
     for (var i = 0; i < vs.length; i++) {
-      if (vs[i] && typeof vs[i].url === "string" && vs[i].url.length > 10) {
+      if (vs[i] && typeof (vs[i].url || vs[i].file) === "string" && String(vs[i].url || vs[i].file).length > 10) {
         return true;
       }
     }
@@ -758,4 +912,4 @@ class AniWatchTV {
   }
 }
 
-module.exports = AniWatchTV;
+module.exports = AnimeKai;
