@@ -1,17 +1,18 @@
 {
-  "id": "aniwatchtv",
-  "name": "AniWatchTV",
-  "version": "1.0.1",
+  "id": "animekai",
+  "name": "AnimeKai",
+  "version": "1.0.2",
   "entry": "source.js",
   "type": "anime-streaming",
-  "website": "https://aniwatchtv.to",
+  "website": "https://animekai.to",
   "supportsSub": true,
   "supportsDub": true,
   "supportsHls": true,
   "supportsPlayback": true,
   "episodeServers": [
-    "VidSrc",
-    "MegaCloud",
-    "T-Cloud"
+    "default",
+    "Hard Sub",
+    "Soft Sub",
+    "Dub & S-Sub"
   ]
 }
