@@ -1,7 +1,7 @@
 class AnimeKai {
   constructor() {
     this.type = "anime-streaming";
-    this.version = "1.0.7-debug";
+    this.version = "1.0.8-debug";
     this.baseUrl = "https://animekai.to";
     this.altBaseUrl = "https://anikai.to";
     this.ua = "Mozilla/5.0 (Linux; Android 10; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
@@ -155,17 +155,47 @@ class AnimeKai {
     return { json: {}, base: this.altBaseUrl };
   }
 
+  _unwrapPageHtml(txt) {
+    // anikai.to/animekai.to wraps watch pages in a JSON envelope:
+    // {"status":"ok","result":"<!DOCTYPE html>..."}
+    // We must unwrap it before searching for anime IDs or episode tokens,
+    // because JSON-escaped quotes (\") break every attribute regex.
+    if (!txt || txt[0] !== '{') return txt;
+    try {
+      var parsed = JSON.parse(txt);
+      // result can be the full HTML string
+      if (parsed.result && typeof parsed.result === 'string' && parsed.result.length > 100) {
+        console.log("[AnimeKai] _unwrapPageHtml: unwrapped JSON envelope, innerLen=" + parsed.result.length);
+        return parsed.result;
+      }
+      // result could also be an object with an html key
+      if (parsed.result && typeof parsed.result === 'object' && parsed.result.html) {
+        console.log("[AnimeKai] _unwrapPageHtml: unwrapped JSON envelope (result.html)");
+        return String(parsed.result.html);
+      }
+      // data field fallback
+      if (parsed.data && typeof parsed.data === 'string' && parsed.data.length > 100) {
+        console.log("[AnimeKai] _unwrapPageHtml: unwrapped JSON envelope (data field)");
+        return parsed.data;
+      }
+    } catch (e) {
+      console.warn("[AnimeKai] _unwrapPageHtml: JSON parse failed: " + e.message);
+    }
+    return txt;
+  }
+
   _pageText(path) {
     var urls = [this.altBaseUrl + path, this.baseUrl + path];
     for (var i = 0; i < urls.length; i++) {
       var base = urls[i].split("/watch/")[0] || this.altBaseUrl;
       console.log("[AnimeKai] _pageText trying url=" + urls[i]);
-      var txt = this._fetchText(urls[i], this._headers({ "Referer": base + "/" }));
+      var raw = this._fetchText(urls[i], this._headers({ "Referer": base + "/" }));
+      var txt = this._unwrapPageHtml(raw);
       if (txt && txt.length > 100) {
-        console.log("[AnimeKai] _pageText SUCCESS url=" + urls[i] + " len=" + txt.length);
+        console.log("[AnimeKai] _pageText SUCCESS url=" + urls[i] + " rawLen=" + raw.length + " unwrappedLen=" + txt.length);
         return { text: txt, base: base };
       }
-      console.warn("[AnimeKai] _pageText EMPTY/SHORT url=" + urls[i] + " len=" + txt.length);
+      console.warn("[AnimeKai] _pageText EMPTY/SHORT url=" + urls[i] + " rawLen=" + raw.length);
     }
     console.error("[AnimeKai] _pageText ALL FAILED path=" + path);
     return { text: "", base: this.altBaseUrl };
