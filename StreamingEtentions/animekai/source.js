@@ -1,7 +1,7 @@
 class AnimeKai {
   constructor() {
     this.type = "anime-streaming";
-    this.version = "1.0.6";
+    this.version = "1.0.7-debug";
     this.baseUrl = "https://animekai.to";
     this.altBaseUrl = "https://anikai.to";
     this.ua = "Mozilla/5.0 (Linux; Android 10; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
@@ -14,6 +14,7 @@ class AnimeKai {
     this._cacheTtl = 8 * 60 * 1000;
     this._cacheMax = 200;
     this._cacheKeys = [];
+    console.log("[AnimeKai] constructor called, version=" + this.version);
   }
 
   getSettings() {
@@ -59,19 +60,24 @@ class AnimeKai {
   }
 
   _nativeFetch(url, method, headers, body) {
+    console.log("[AnimeKai] _nativeFetch url=" + url + " method=" + (method || "GET"));
     try {
       var raw = Native.fetch(String(url), method || "GET", JSON.stringify(headers || {}), body == null ? "" : String(body));
       var j = {};
       try { j = JSON.parse(raw || "{}"); } catch (_) {}
+      var status = Number(j.status || 0);
+      var bodyLen = String(j.body || "").length;
+      console.log("[AnimeKai] _nativeFetch DONE url=" + url + " status=" + status + " ok=" + j.ok + " bodyLen=" + bodyLen + (j.error ? " error=" + j.error : "") + (j.message ? " msg=" + j.message : ""));
       return {
         ok: !!j.ok,
-        status: Number(j.status || 0),
+        status: status,
         headers: j.headers || {},
         body: String(j.body || ""),
         error: String(j.error || ""),
         message: String(j.message || "")
       };
     } catch (e) {
+      console.error("[AnimeKai] _nativeFetch EXCEPTION url=" + url + " err=" + e.message);
       return { ok: false, status: 0, headers: {}, body: "", error: "", message: String(e && e.message || e || "") };
     }
   }
@@ -89,31 +95,63 @@ class AnimeKai {
   }
 
   _fetchText(url, headers) {
-    return String(this._nativeFetch(url, "GET", headers || this._headers(), "").body || "");
+    var result = this._nativeFetch(url, "GET", headers || this._headers(), "");
+    var body = String(result.body || "");
+    console.log("[AnimeKai] _fetchText url=" + url + " bodyLen=" + body.length + " status=" + result.status + " preview=" + body.substring(0, 120).replace(/\s+/g, " "));
+    return body;
   }
 
   _fetchJson(url, headers) {
     var txt = this._fetchText(url, headers || this._headers()).replace(/^\uFEFF/, "").trim();
-    if (!txt) return {};
-    try { var o = JSON.parse(txt); return o && typeof o === "object" ? o : {}; } catch (_) { return {}; }
+    if (!txt) {
+      console.warn("[AnimeKai] _fetchJson empty body url=" + url);
+      return {};
+    }
+    try {
+      var o = JSON.parse(txt);
+      var result = (o && typeof o === "object") ? o : {};
+      console.log("[AnimeKai] _fetchJson url=" + url + " keys=" + Object.keys(result).join(","));
+      return result;
+    } catch (e) {
+      console.warn("[AnimeKai] _fetchJson parse error url=" + url + " err=" + e.message + " preview=" + txt.substring(0, 80));
+      return {};
+    }
   }
 
   _postJson(url, headers, body) {
+    console.log("[AnimeKai] _postJson url=" + url);
     var txt = String(this._nativeFetch(url, "POST", headers || this._headers({ "Content-Type": "application/json" }), body || "").body || "").replace(/^\uFEFF/, "").trim();
-    if (!txt) return {};
-    try { var o = JSON.parse(txt); return o && typeof o === "object" ? o : {}; } catch (_) { return {}; }
+    if (!txt) {
+      console.warn("[AnimeKai] _postJson empty response url=" + url);
+      return {};
+    }
+    try {
+      var o = JSON.parse(txt);
+      var result = (o && typeof o === "object") ? o : {};
+      console.log("[AnimeKai] _postJson url=" + url + " keys=" + Object.keys(result).join(","));
+      return result;
+    } catch (e) {
+      console.warn("[AnimeKai] _postJson parse error url=" + url + " err=" + e.message);
+      return {};
+    }
   }
 
   _apiJson(path) {
     var urls = [this.altBaseUrl + path, this.baseUrl + path];
     for (var i = 0; i < urls.length; i++) {
       var base = urls[i].split("/ajax/")[0] || urls[i].split("/watch/")[0] || this.altBaseUrl;
+      console.log("[AnimeKai] _apiJson trying url=" + urls[i]);
       var j = this._fetchJson(urls[i], this._headers({
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Referer": base + "/"
       }));
-      if (j && Object.keys(j).length) return { json: j, base: base };
+      if (j && Object.keys(j).length) {
+        console.log("[AnimeKai] _apiJson SUCCESS url=" + urls[i] + " keys=" + Object.keys(j).join(","));
+        return { json: j, base: base };
+      }
+      console.warn("[AnimeKai] _apiJson EMPTY url=" + urls[i]);
     }
+    console.error("[AnimeKai] _apiJson ALL FAILED path=" + path);
     return { json: {}, base: this.altBaseUrl };
   }
 
@@ -121,9 +159,15 @@ class AnimeKai {
     var urls = [this.altBaseUrl + path, this.baseUrl + path];
     for (var i = 0; i < urls.length; i++) {
       var base = urls[i].split("/watch/")[0] || this.altBaseUrl;
+      console.log("[AnimeKai] _pageText trying url=" + urls[i]);
       var txt = this._fetchText(urls[i], this._headers({ "Referer": base + "/" }));
-      if (txt && txt.length > 100) return { text: txt, base: base };
+      if (txt && txt.length > 100) {
+        console.log("[AnimeKai] _pageText SUCCESS url=" + urls[i] + " len=" + txt.length);
+        return { text: txt, base: base };
+      }
+      console.warn("[AnimeKai] _pageText EMPTY/SHORT url=" + urls[i] + " len=" + txt.length);
     }
+    console.error("[AnimeKai] _pageText ALL FAILED path=" + path);
     return { text: "", base: this.altBaseUrl };
   }
 
@@ -308,7 +352,10 @@ class AnimeKai {
 
     var cacheKey = q + "|" + track + "|" + targets.join("|");
     var cached = this._cacheGet(this._searchCache, this._searchCacheTime, cacheKey);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      console.log("[AnimeKai] search CACHE HIT q=" + q + " count=" + cached.length);
+      return cached;
+    }
 
     var paths = [
       "/ajax/anime/search?keyword=" + encodeURIComponent(q),
@@ -317,17 +364,24 @@ class AnimeKai {
     ];
     var results = [];
     for (var p = 0; p < paths.length; p++) {
+      console.log("[AnimeKai] search trying path=" + paths[p] + " q=" + q + " track=" + track);
       if (paths[p].indexOf("/ajax/") === 0) {
         var api = this._apiJson(paths[p]);
         var html = this._extractResultHtml(api.json);
+        console.log("[AnimeKai] search ajax htmlLen=" + html.length);
         if (html) results = this._parseSearchResults(html, track, targets);
       } else {
         var page = this._pageText(paths[p]);
+        console.log("[AnimeKai] search page textLen=" + page.text.length);
         if (page.text) results = this._parseSearchResults(page.text, track, targets);
       }
-      if (results.length) break;
+      if (results.length) {
+        console.log("[AnimeKai] search SUCCESS path=" + paths[p] + " results=" + results.length);
+        break;
+      }
     }
 
+    console.log("[AnimeKai] search DONE q=" + q + " track=" + track + " results=" + results.length);
     this._cacheSet(this._searchCache, this._searchCacheTime, cacheKey, results);
     return results;
   }
@@ -342,7 +396,11 @@ class AnimeKai {
   _encdec(s, mode) {
     var endpoint = mode === "d" ? "dec-kai" : "enc-kai";
     var text = String(s || "");
-    if (!text) return "";
+    if (!text) {
+      console.warn("[AnimeKai] _encdec called with empty string mode=" + mode);
+      return "";
+    }
+    console.log("[AnimeKai] _encdec START mode=" + mode + " input=" + text.substring(0, 40));
     if (mode === "d") {
       var post = this._postJson("https://enc-dec.app/api/" + endpoint, {
         "Content-Type": "application/json",
@@ -350,14 +408,24 @@ class AnimeKai {
         "User-Agent": this.ua,
         "Referer": "https://enc-dec.app/"
       }, JSON.stringify({ text: text }));
-      if (post && post.result !== undefined) return post.result;
+      if (post && post.result !== undefined) {
+        console.log("[AnimeKai] _encdec decode result type=" + typeof post.result + " len=" + String(post.result).length);
+        return post.result;
+      }
+      console.warn("[AnimeKai] _encdec decode no result keys=" + Object.keys(post).join(","));
     }
     var url = "https://enc-dec.app/api/" + endpoint + "?text=" + encodeURIComponent(text);
     var json = this._fetchJson(url, this._headers({
       "Accept": "application/json, text/plain, */*",
       "Referer": "https://enc-dec.app/"
     }));
-    return json && json.result !== undefined ? json.result : "";
+    var result = json && json.result !== undefined ? json.result : "";
+    if (!result) {
+      console.error("[AnimeKai] _encdec FAILED mode=" + mode + " input=" + text.substring(0, 40) + " responseKeys=" + Object.keys(json).join(","));
+    } else {
+      console.log("[AnimeKai] _encdec SUCCESS mode=" + mode + " output=" + String(result).substring(0, 40));
+    }
+    return result;
   }
 
   _extractAnimeId(html) {
@@ -370,8 +438,13 @@ class AnimeKai {
       try {
         var obj = JSON.parse(txt);
         var id = String(obj.anime_id || obj.ani_id || obj.animeId || obj.id || "");
-        if (id && /^\d+$/.test(id)) return id;
-      } catch (_) {}
+        if (id && /^\d+$/.test(id)) {
+          console.log("[AnimeKai] _extractAnimeId found via syncData id=" + id);
+          return id;
+        }
+      } catch (e) {
+        console.warn("[AnimeKai] _extractAnimeId syncData parse error: " + e.message);
+      }
     }
 
     var inlinePatterns = [
@@ -389,24 +462,37 @@ class AnimeKai {
 
     for (var i = 0; i < inlinePatterns.length; i++) {
       var m = html.match(inlinePatterns[i]);
-      if (m && m[1] && /^\d+$/.test(m[1])) return m[1];
+      if (m && m[1] && /^\d+$/.test(m[1])) {
+        console.log("[AnimeKai] _extractAnimeId found via pattern[" + i + "] id=" + m[1]);
+        return m[1];
+      }
     }
 
+    console.error("[AnimeKai] _extractAnimeId FAILED - no anime ID found in HTML (htmlLen=" + html.length + ")");
+    // Log a snippet of the HTML to check what we got
+    var snippet = html.substring(0, 500).replace(/\s+/g, " ");
+    console.log("[AnimeKai] _extractAnimeId HTML snippet: " + snippet);
     return "";
   }
 
   _parseEpisodesHtml(html, mediaId, track) {
     var out = [];
     var seen = {};
+    var totalAnchors = 0;
+    var tokenMissing = 0;
+    var numMissing = 0;
+    var langFiltered = 0;
     var re = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
     var m;
     while ((m = re.exec(html)) !== null) {
+      totalAnchors++;
       var attrs = this._attrs(m[1]);
       var token = attrs.token || attrs["data-token"] || "";
       var num = attrs.num || attrs["data-num"] || attrs["data-number"] || "";
       var slug = attrs.slug || attrs["data-slug"] || "";
 
-      if (!token || !num) continue;
+      if (!token) { tokenMissing++; continue; }
+      if (!num) { numMissing++; continue; }
       if (seen[token]) continue;
 
       var langs = String(attrs.langs || attrs["data-langs"] || "");
@@ -414,8 +500,8 @@ class AnimeKai {
         var bits = parseInt(langs, 10);
         var hasSub = !!(bits & 1);
         var hasDub = !!(bits & 2);
-        if (track === "sub" && !hasSub) continue;
-        if (track === "dub" && !hasDub) continue;
+        if (track === "sub" && !hasSub) { langFiltered++; continue; }
+        if (track === "dub" && !hasDub) { langFiltered++; continue; }
       }
 
       seen[token] = true;
@@ -432,29 +518,65 @@ class AnimeKai {
         title: title || "Episode " + n
       });
     }
+
+    console.log("[AnimeKai] _parseEpisodesHtml mediaId=" + mediaId + " track=" + track +
+      " htmlLen=" + html.length +
+      " totalAnchors=" + totalAnchors +
+      " tokenMissing=" + tokenMissing +
+      " numMissing=" + numMissing +
+      " langFiltered=" + langFiltered +
+      " parsed=" + out.length);
+
+    if (out.length === 0 && html.length > 0) {
+      // Log a snippet of what we got to understand the structure
+      var snippet = html.substring(0, 600).replace(/\s+/g, " ");
+      console.warn("[AnimeKai] _parseEpisodesHtml zero results snippet: " + snippet);
+    }
+
     out.sort(function(a, b) { return a.number - b.number; });
     return out;
   }
 
   findEpisodes(Id) {
+    console.log("[AnimeKai] findEpisodes START Id=" + Id);
     var parsed = this._parseMediaId(Id);
     var mediaId = parsed.id;
     var track = parsed.track;
-    if (!mediaId) return [];
+
+    console.log("[AnimeKai] findEpisodes mediaId=" + mediaId + " track=" + track);
+
+    if (!mediaId) {
+      console.error("[AnimeKai] findEpisodes ABORT: empty mediaId");
+      return [];
+    }
 
     var cacheKey = mediaId + "|" + track;
     var cached = this._cacheGet(this._episodeCache, this._episodeCacheTime, cacheKey);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      console.log("[AnimeKai] findEpisodes CACHE HIT count=" + cached.length);
+      return cached;
+    }
 
+    console.log("[AnimeKai] findEpisodes fetching watch page /watch/" + mediaId);
     var page = this._pageText("/watch/" + mediaId);
     var html = page.text;
-    if (!html) return [];
+
+    if (!html) {
+      console.error("[AnimeKai] findEpisodes FAILED: empty page for mediaId=" + mediaId);
+      return [];
+    }
+
+    console.log("[AnimeKai] findEpisodes page htmlLen=" + html.length);
 
     var animeId = this._extractAnimeId(html);
+    console.log("[AnimeKai] findEpisodes animeId=" + animeId);
+
     var episodes = [];
 
     if (animeId) {
       var encId = this._encdec(animeId, "e");
+      console.log("[AnimeKai] findEpisodes encId=" + encId);
+
       if (encId) {
         var ajaxPaths = [
           "/ajax/episodes/list?ani_id=" + encodeURIComponent(animeId) + "&_=" + encodeURIComponent(encId),
@@ -462,17 +584,27 @@ class AnimeKai {
           "/ajax/anime/episodes?ani_id=" + encodeURIComponent(animeId) + "&_=" + encodeURIComponent(encId)
         ];
         for (var a = 0; a < ajaxPaths.length; a++) {
+          console.log("[AnimeKai] findEpisodes trying ajax path=" + ajaxPaths[a]);
           var api = this._apiJson(ajaxPaths[a]);
           var epHtml = this._extractResultHtml(api.json);
+          console.log("[AnimeKai] findEpisodes ajax path=" + ajaxPaths[a] + " htmlLen=" + epHtml.length + " jsonKeys=" + Object.keys(api.json).join(","));
           if (epHtml) {
             episodes = this._parseEpisodesHtml(epHtml, mediaId, track);
-            if (episodes.length) break;
+            if (episodes.length) {
+              console.log("[AnimeKai] findEpisodes SUCCESS via ajax[" + a + "] count=" + episodes.length);
+              break;
+            }
           }
         }
+      } else {
+        console.error("[AnimeKai] findEpisodes enc-dec returned empty for animeId=" + animeId);
       }
+    } else {
+      console.warn("[AnimeKai] findEpisodes no animeId extracted - skipping AJAX, trying fallback patterns");
     }
 
     if (!episodes.length) {
+      console.log("[AnimeKai] findEpisodes trying fallback rate-box patterns");
       var fbPatterns = [
         /class=["'][^"']*rate-box[^"']*["'][^>]*data-id=["']([^"']+)["']/i,
         /data-id=["']([^"']+)["'][^>]*class=["'][^"']*rate-box/i,
@@ -482,13 +614,19 @@ class AnimeKai {
         var fbM = html.match(fbPatterns[pi]);
         if (fbM && fbM[1] && fbM[1] !== animeId) {
           var fbId = fbM[1];
+          console.log("[AnimeKai] findEpisodes fallback pattern[" + pi + "] fbId=" + fbId);
           var fbEnc = this._encdec(fbId, "e");
+          console.log("[AnimeKai] findEpisodes fallback fbEnc=" + fbEnc);
           if (fbEnc) {
             var fbApi = this._apiJson("/ajax/episodes/list?ani_id=" + encodeURIComponent(fbId) + "&_=" + encodeURIComponent(fbEnc));
             var fbHtml = this._extractResultHtml(fbApi.json);
+            console.log("[AnimeKai] findEpisodes fallback fbHtmlLen=" + fbHtml.length);
             if (fbHtml) {
               episodes = this._parseEpisodesHtml(fbHtml, mediaId, track);
-              if (episodes.length) break;
+              if (episodes.length) {
+                console.log("[AnimeKai] findEpisodes SUCCESS via fallback pattern[" + pi + "] count=" + episodes.length);
+                break;
+              }
             }
           }
         }
@@ -496,7 +634,15 @@ class AnimeKai {
     }
 
     if (!episodes.length) {
+      console.warn("[AnimeKai] findEpisodes trying inline HTML parse on watch page");
       episodes = this._parseEpisodesHtml(html, mediaId, track);
+      console.log("[AnimeKai] findEpisodes inline parse count=" + episodes.length);
+    }
+
+    if (!episodes.length) {
+      console.error("[AnimeKai] findEpisodes FINAL RESULT: 0 episodes for mediaId=" + mediaId + " track=" + track);
+    } else {
+      console.log("[AnimeKai] findEpisodes FINAL RESULT: count=" + episodes.length + " first=" + JSON.stringify(episodes[0]));
     }
 
     this._cacheSet(this._episodeCache, this._episodeCacheTime, cacheKey, episodes);
@@ -543,6 +689,7 @@ class AnimeKai {
       var text = this._stripTags(m[3]);
       out.push({ lid: lid, sid: attrs["data-sid"] || "", eid: attrs["data-eid"] || "", type: type, name: text || "Server", label: this._typeSuffix(type) + " - " + (text || "Server") });
     }
+    console.log("[AnimeKai] _parseServersHtml found=" + out.length + " servers=" + out.map(function(s) { return s.label + "(lid=" + s.lid + ")"; }).join(", "));
     return out;
   }
 
@@ -595,20 +742,24 @@ class AnimeKai {
   }
 
   _extractMegaUp(embedUrl) {
+    console.log("[AnimeKai] _extractMegaUp embedUrl=" + embedUrl);
     try {
       var origin = this._originFromUrl(embedUrl);
       var videoId = String(embedUrl || "").split("?")[0].replace(/\/+$/, "").split("/").pop();
       var mediaUrl = String(embedUrl).indexOf("/e/") !== -1
         ? String(embedUrl).replace("/e/" + videoId, "/media/" + videoId)
         : origin + "/media/" + videoId;
+      console.log("[AnimeKai] _extractMegaUp mediaUrl=" + mediaUrl + " videoId=" + videoId);
       var media = this._fetchJson(mediaUrl, this._headers({ "Accept": "application/json, text/plain, */*", "Referer": origin + "/", "Origin": origin }));
       var token = media.result || media.data || media.token || "";
+      console.log("[AnimeKai] _extractMegaUp token=" + (token ? "present len=" + String(token).length : "MISSING") + " mediaKeys=" + Object.keys(media).join(","));
       if (!token) return null;
       var dec = this._postJson("https://enc-dec.app/api/dec-mega", {
         "Content-Type": "application/json", "Accept": "application/json", "User-Agent": this.ua, "Referer": "https://enc-dec.app/"
       }, JSON.stringify({ text: token, agent: this.ua }));
       var result = dec.result || dec;
       if (typeof result === "string") { try { result = JSON.parse(result); } catch (_) {} }
+      console.log("[AnimeKai] _extractMegaUp dec-mega result sources=" + (result && result.sources ? result.sources.length : "null"));
       if (!result || !result.sources || !result.sources.length) return null;
       var subList = this._searchParam(embedUrl, "sub.list");
       if (subList) {
@@ -616,50 +767,88 @@ class AnimeKai {
         if (subJson && subJson.length) result.tracks = subJson;
       }
       return { sources: result.sources, tracks: result.tracks || [], referer: origin + "/" };
-    } catch (e) { return null; }
+    } catch (e) {
+      console.error("[AnimeKai] _extractMegaUp EXCEPTION: " + e.message);
+      return null;
+    }
   }
 
   _extractEmbed(embedUrl) {
+    console.log("[AnimeKai] _extractEmbed embedUrl=" + embedUrl);
     var host = String(embedUrl || "").match(/^https?:\/\/([^\/?#]+)/i);
     host = host ? host[1].toLowerCase() : "";
-    if (!host) return null;
+    if (!host) {
+      console.error("[AnimeKai] _extractEmbed no host in embedUrl");
+      return null;
+    }
+    console.log("[AnimeKai] _extractEmbed host=" + host);
     if (/^(4spromax|megaup|rapidairmax|rapidshare)(\d+)?\.?/.test(host) || host.indexOf("megaup") !== -1 || host.indexOf("rapid") !== -1) {
+      console.log("[AnimeKai] _extractEmbed using MegaUp extractor");
       return this._extractMegaUp(embedUrl);
     }
+    console.log("[AnimeKai] _extractEmbed trying fallback ofchaos API");
     var fallback = this._fetchJson("https://ac-api.ofchaos.com/api/anime/embed/convert/v2?embedUrl=" + encodeURIComponent(embedUrl), this._headers({ "Accept": "application/json" }));
-    if (fallback && fallback.sources && fallback.sources.length) return fallback;
+    if (fallback && fallback.sources && fallback.sources.length) {
+      console.log("[AnimeKai] _extractEmbed ofchaos SUCCESS sources=" + fallback.sources.length);
+      return fallback;
+    }
+    console.log("[AnimeKai] _extractEmbed ofchaos empty, trying MegaUp as fallback");
     return this._extractMegaUp(embedUrl);
   }
 
   findEpisodeServer(episodeObj, serverName) {
+    console.log("[AnimeKai] findEpisodeServer START episodeObj=" + JSON.stringify(episodeObj) + " serverName=" + serverName);
     var ep = this._parseEpisodeObj(episodeObj);
+    console.log("[AnimeKai] findEpisodeServer parsed ep=" + JSON.stringify(ep));
     if (!ep.token) throw new Error("Missing episode token");
     var cacheKey = "srv:" + ep.token + ":" + ep.track + ":" + String(serverName || "default");
     var cached = this._cacheGet(this._serverCache, this._serverCacheTime, cacheKey);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      console.log("[AnimeKai] findEpisodeServer CACHE HIT");
+      return cached;
+    }
+
     var encToken = this._encdec(ep.token, "e");
+    console.log("[AnimeKai] findEpisodeServer encToken=" + encToken);
     if (!encToken) throw new Error("Could not encode episode token");
+
     var listApi = this._apiJson("/ajax/links/list?token=" + encodeURIComponent(ep.token) + "&_=" + encodeURIComponent(encToken));
+    console.log("[AnimeKai] findEpisodeServer listApi keys=" + Object.keys(listApi.json).join(","));
     var serversHtml = this._extractResultHtml(listApi.json);
+    console.log("[AnimeKai] findEpisodeServer serversHtml len=" + serversHtml.length);
     var servers = this._parseServersHtml(serversHtml);
     if (!servers.length) throw new Error("No servers returned");
+
     var chosen = this._chooseServer(servers, serverName, ep.track);
+    console.log("[AnimeKai] findEpisodeServer chosen=" + JSON.stringify(chosen));
     if (!chosen || !chosen.lid) throw new Error("No matching server");
+
     var encLid = this._encdec(chosen.lid, "e");
+    console.log("[AnimeKai] findEpisodeServer encLid=" + encLid);
     if (!encLid) throw new Error("Could not encode server id");
+
     var viewApi = this._apiJson("/ajax/links/view?id=" + encodeURIComponent(chosen.lid) + "&_=" + encodeURIComponent(encLid));
+    console.log("[AnimeKai] findEpisodeServer viewApi keys=" + Object.keys(viewApi.json).join(","));
     var encResult = viewApi.json && viewApi.json.result !== undefined ? viewApi.json.result : "";
+    console.log("[AnimeKai] findEpisodeServer encResult len=" + String(encResult).length);
     if (!encResult) throw new Error("No server link result");
+
     var dec = this._encdec(encResult, "d");
+    console.log("[AnimeKai] findEpisodeServer dec type=" + typeof dec);
     if (typeof dec === "string") { try { dec = JSON.parse(dec); } catch (_) {} }
     var embedUrl = typeof dec === "string" ? dec : dec && dec.url ? dec.url : "";
+    console.log("[AnimeKai] findEpisodeServer embedUrl=" + embedUrl);
     if (!embedUrl) throw new Error("No embed url");
+
     var extracted = this._extractEmbed(embedUrl);
+    console.log("[AnimeKai] findEpisodeServer extracted sources=" + (extracted && extracted.sources ? extracted.sources.length : "null"));
     if (!extracted || !extracted.sources || !extracted.sources.length) throw new Error("No extracted sources");
+
     var stream = null;
     for (var i = 0; i < extracted.sources.length; i++) {
       var s = extracted.sources[i] || {};
       var file = s.file || s.url || "";
+      console.log("[AnimeKai] findEpisodeServer source[" + i + "] type=" + s.type + " file=" + file.substring(0, 80));
       if (file && (s.type === "hls" || String(file).indexOf(".m3u8") !== -1)) { stream = s; break; }
     }
     if (!stream) {
@@ -669,10 +858,14 @@ class AnimeKai {
       }
     }
     if (!stream) throw new Error("No playable source");
+
     var url = stream.file || stream.url;
     var origin = this._originFromUrl(embedUrl);
     var subtitles = this._normalizeTracks(extracted.tracks || []);
     var type = String(url).indexOf(".mpd") !== -1 ? "mpd" : String(url).indexOf(".m3u8") !== -1 || stream.type === "hls" ? "m3u8" : "mp4";
+
+    console.log("[AnimeKai] findEpisodeServer SUCCESS url=" + url.substring(0, 80) + " type=" + type + " subtitles=" + subtitles.length);
+
     var resp = {
       server: chosen.label || chosen.name || "default",
       headers: { "Referer": extracted.referer || origin + "/", "Origin": origin, "User-Agent": this.ua },
