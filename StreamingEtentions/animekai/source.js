@@ -700,91 +700,86 @@ class AnimeKai {
   }
 
   _parseServersHtml(html) {
-    // Log full HTML for debugging (capped at 2000 chars)
-    console.log("[AnimeKai] _parseServersHtml RAW HTML (len=" + html.length + "): " + html.substring(0, 2000).replace(/\s+/g, " "));
+    html = String(html || "");
+    console.log("[AnimeKai] _parseServersHtml RAW HTML len=" + html.length + ": " + html.substring(0, 300).replace(/\s+/g, " "));
 
     var out = [];
-
-    // Based on the TypeScript reference extension, the structure is:
-    // <div class="server-items lang-group" data-id="sub">
-    //   <span class="server" data-lid="xxx">Server 1</span>
-    // </div>
-    // Extract each lang group first, then find servers within each.
+    var seen = {};
     var types = ["sub", "softsub", "dub"];
 
     for (var t = 0; t < types.length; t++) {
       var typeId = types[t];
-      // Match the lang group div for this type
-      var groupPattern = 'data-id=["\']' + typeId + '["\']';
-      var groupIdx = html.search(new RegExp(groupPattern, 'i'));
-      if (groupIdx === -1) {
-        console.log("[AnimeKai] _parseServersHtml no group found for type=" + typeId);
+      var searchFrom = 0;
+      var sectionStart = -1;
+
+      // Search for the server-items div for this type.
+      // We look for the string "server-items" in the HTML, then check if the enclosing
+      // tag (up to the next ">") contains data-id="typeId".
+      // This avoids matching the tab nav <span data-id="sub"> which has no "server-items".
+      while (true) {
+        var siIdx = html.indexOf("server-items", searchFrom);
+        if (siIdx === -1) break;
+
+        var tagEnd = html.indexOf(">", siIdx);
+        if (tagEnd === -1) break;
+
+        var tagContent = html.substring(siIdx, tagEnd);
+
+        if (tagContent.indexOf('data-id="' + typeId + '"') !== -1 ||
+            tagContent.indexOf("data-id='" + typeId + "'") !== -1) {
+          sectionStart = tagEnd + 1;
+          break;
+        }
+
+        searchFrom = siIdx + 1;
+      }
+
+      if (sectionStart === -1) {
+        console.log("[AnimeKai] _parseServersHtml no server-items section for type=" + typeId);
         continue;
       }
-      // Find the end of this section (next server-items div or end of html)
-      var groupStart = groupIdx;
-      var nextGroupIdx = html.indexOf('server-items', groupIdx + groupPattern.length);
-      var groupHtml = nextGroupIdx === -1
-        ? html.substring(groupStart)
-        : html.substring(groupStart, nextGroupIdx);
 
-      console.log("[AnimeKai] _parseServersHtml type=" + typeId + " groupHtml=" + groupHtml.substring(0, 300).replace(/\s+/g, " "));
+      var sectionEnd = html.indexOf("</div>", sectionStart);
+      var sectionHtml = sectionEnd === -1
+        ? html.substring(sectionStart)
+        : html.substring(sectionStart, sectionEnd);
 
-      // Find all <span class="server" data-lid="..."> within this group
-      // Also try <a class="server" ...> or any element with data-lid
-      var lidPattern = /data-lid=["']([^"']+)["']/gi;
-      var namePattern = />([^<]+)<\//;
+      console.log("[AnimeKai] _parseServersHtml type=" + typeId + " sectionLen=" + sectionHtml.length + " preview=" + sectionHtml.substring(0, 150).replace(/\s+/g, " "));
+
+      var lidRe = /data-lid=["']([^"']+)["']/gi;
       var m;
-      // Find all data-lid occurrences in this group section
-      var lidRe = /data-lid=["']([^"']+)["'][^>]*(?:data-sid=["']([^"']*)")?[^>]*>([^<]*)</gi;
-      while ((m = lidRe.exec(groupHtml)) !== null) {
+      while ((m = lidRe.exec(sectionHtml)) !== null) {
         var lid = m[1];
-        if (!lid) continue;
-        var name = (m[3] || "Server").trim() || "Server";
+        var key = typeId + "|" + lid;
+        if (!lid || seen[key]) continue;
+        seen[key] = true;
+        var serverNum = out.filter(function(x) { return x.type === typeId; }).length + 1;
         out.push({
-          lid: lid,
-          sid: m[2] || "",
-          eid: "",
-          type: typeId,
-          name: name,
-          label: this._typeSuffix(typeId) + " - " + name
+          lid: lid, sid: "", eid: "", type: typeId,
+          name: "Server " + serverNum,
+          label: this._typeSuffix(typeId) + " - Server " + serverNum
         });
-        console.log("[AnimeKai] _parseServersHtml found server lid=" + lid + " name=" + name + " type=" + typeId);
+        console.log("[AnimeKai] _parseServersHtml found type=" + typeId + " lid=" + lid + " as Server " + serverNum);
       }
+    }
 
-      if (out.filter(function(s) { return s.type === typeId; }).length === 0) {
-        // Fallback: look for any element with data-lid in this group
-        var fallbackRe = /data-lid=["']([^"']+)["']/gi;
-        while ((m = fallbackRe.exec(groupHtml)) !== null) {
-          var lid2 = m[1];
-          if (!lid2 || out.some(function(s) { return s.lid === lid2; })) continue;
-          out.push({
-            lid: lid2, sid: "", eid: "", type: typeId,
-            name: "Server", label: this._typeSuffix(typeId) + " - Server"
-          });
-          console.log("[AnimeKai] _parseServersHtml fallback server lid=" + lid2 + " type=" + typeId);
+    if (!out.length) {
+      console.warn("[AnimeKai] _parseServersHtml no typed groups found, global data-lid fallback");
+      var globalRe = /data-lid=["']([^"']+)["']/gi;
+      var gm;
+      while ((gm = globalRe.exec(html)) !== null) {
+        if (!out.some(function(s) { return s.lid === gm[1]; })) {
+          out.push({ lid: gm[1], sid: "", eid: "", type: "sub", name: "Server", label: "Hard Sub - Server" });
+          console.log("[AnimeKai] _parseServersHtml global fallback lid=" + gm[1]);
         }
       }
     }
 
-    // If still nothing, try a global search for data-lid anywhere
-    if (!out.length) {
-      console.warn("[AnimeKai] _parseServersHtml no typed groups found, trying global data-lid search");
-      var globalRe = /data-lid=["']([^"']+)["']/gi;
-      var m2;
-      while ((m2 = globalRe.exec(html)) !== null) {
-        var lid3 = m2[1];
-        if (out.some(function(s) { return s.lid === lid3; })) continue;
-        out.push({ lid: lid3, sid: "", eid: "", type: "sub", name: "Server", label: "Hard Sub - Server" });
-        console.log("[AnimeKai] _parseServersHtml global fallback lid=" + lid3);
-      }
-    }
-
-    console.log("[AnimeKai] _parseServersHtml FINAL found=" + out.length + " servers=" + out.map(function(s) { return s.label + "(lid=" + s.lid + ")"; }).join(", "));
+    console.log("[AnimeKai] _parseServersHtml FINAL found=" + out.length + " servers=" + out.map(function(s) { return s.type + ":" + s.label + "(" + s.lid + ")"; }).join(", "));
     return out;
   }
 
-  _chooseServer(servers, serverName, track) {
+      _chooseServer(servers, serverName, track) {
     if (!servers || !servers.length) return null;
     var want = String(serverName || "").toLowerCase().replace(/\s+/g, "-");
     var preferredTypes = track === "dub" ? ["dub", "sub", "softsub"] : ["softsub", "sub", "dub"];
