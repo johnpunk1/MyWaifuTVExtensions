@@ -1,40 +1,43 @@
+// Miruro.tv extension for WaifuTV
+// API: https://www.miruro.tv/api/secure/pipe?e=BASE64URL(json_payload)
+// Response: base64url(gzip(json))  [x-obfuscated: 1]
+// Providers: arc=AnimeKai(intro/outro), zoro=HiAnime(VTT subs), kiwi=AnimePahe(hardsub)
+
 class Miruro {
   constructor() {
     this.type       = "anime-streaming";
-    this.version    = "1.0.0";
-    this.baseUrl    = "https://public-miruro-consumet-api.vercel.app";
+    this.version    = "1.1.0";
+    this.baseUrl    = "https://www.miruro.tv";
     this.aniskipUrl = "https://api.aniskip.com/v2";
     this.ua         = "Mozilla/5.0 (Linux; Android 10; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
 
+    // Provider preference: arc=AnimeKai has intro/outro, zoro=HiAnime has VTT subs, kiwi=AnimePahe hardsub
+    this._subProviders = ["arc", "zoro", "kiwi"];
+    this._dubProviders = ["zoro", "kiwi", "arc"];
+
     this._episodeCache    = {};
-    this._episodeTimeMap  = {};
+    this._episodeCacheTime = {};
     this._serverCache     = {};
-    this._serverTimeMap   = {};
-    this._malIdCache      = {};   // anilistId → malId (permanent, malId never changes)
-    this._cacheTtl        = 8 * 60 * 1000; // 8 minutes
+    this._serverCacheTime  = {};
+    this._malIdCache      = {};
+    this._cacheTtl        = 8 * 60 * 1000;
 
-    console.log("[Miruro] constructor called version=" + this.version);
+    console.log("[Miruro] init version=" + this.version);
   }
-
-  // ─────────────────────────────────────────────
-  // Settings
-  // ─────────────────────────────────────────────
 
   getSettings() {
     return {
-      episodeServers: ["default"],
-      supportsSub:    true,
-      supportsDub:    true,
-      supportsHls:    true,
+      episodeServers:   ["default"],
+      supportsSub:      true,
+      supportsDub:      true,
+      supportsHls:      true,
       supportsPlayback: true
     };
   }
 
   stream() { return null; }
 
-  // ─────────────────────────────────────────────
-  // Cache helpers
-  // ─────────────────────────────────────────────
+  // ─── Cache ────────────────────────────────────────────────────────────────
 
   _cacheGet(store, timeMap, key) {
     var val = store[key];
@@ -44,55 +47,94 @@ class Miruro {
     }
     return val;
   }
-
-  _cacheSet(store, timeMap, key, value) {
-    store[key] = value;
-    timeMap[key] = Date.now();
+  _cacheSet(store, timeMap, key, val) {
+    store[key] = val; timeMap[key] = Date.now();
   }
 
-  // ─────────────────────────────────────────────
-  // Network
-  // ─────────────────────────────────────────────
+  // ─── Base64 helpers ───────────────────────────────────────────────────────
 
-  _nativeFetch(url, method, headers, body) {
-    console.log("[Miruro] fetch url=" + url);
+  _base64Encode(str) {
     try {
-      var raw = Native.fetch(
-        String(url), method || "GET",
-        JSON.stringify(headers || {}),
-        body == null ? "" : String(body)
-      );
+      // Rhino / JVM path
+      var bytes = new java.lang.String(str).getBytes("UTF-8");
+      return String(java.util.Base64.getEncoder().encodeToString(bytes));
+    } catch (_) {}
+    try { return btoa(unescape(encodeURIComponent(str))); } catch (_) {}
+    return "";
+  }
+
+  _base64UrlEncode(str) {
+    return this._base64Encode(str)
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  // ─── Pipe API ─────────────────────────────────────────────────────────────
+
+  _encodePayload(path, query) {
+    var payload = JSON.stringify({
+      path: path, method: "GET", query: query || {}, body: null, version: "0.2.0"
+    });
+    return this._base64UrlEncode(payload);
+  }
+
+  // Decode base64url(gzip(json)) response → parsed object
+  _decodeBody(body) {
+    if (!body || body.length < 4) return null;
+    var b64 = body.replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4 !== 0) b64 += "=";
+    try {
+      var compressed = java.util.Base64.getDecoder().decode(b64);
+      var gzis       = new java.util.zip.GZIPInputStream(
+                         new java.io.ByteArrayInputStream(compressed));
+      var reader     = new java.io.BufferedReader(
+                         new java.io.InputStreamReader(gzis, "UTF-8"));
+      var sb = new java.lang.StringBuilder();
+      var line;
+      while ((line = reader.readLine()) !== null) sb.append(line).append("\n");
+      reader.close();
+      return JSON.parse(String(sb.toString()).trim());
+    } catch (e) {
+      console.error("[Miruro] _decodeBody error: " + (e.message || e));
+      return null;
+    }
+  }
+
+  _pipe(path, query) {
+    var e   = this._encodePayload(path, query);
+    var url = this.baseUrl + "/api/secure/pipe?e=" + e;
+    console.log("[Miruro] pipe path=" + path + " query=" + JSON.stringify(query));
+    var res = this._fetch(url);
+    if (!res || !res.body) { console.warn("[Miruro] pipe empty path=" + path); return null; }
+    var data = this._decodeBody(res.body);
+    if (!data) console.warn("[Miruro] pipe decode failed path=" + path);
+    return data;
+  }
+
+  // ─── Network ──────────────────────────────────────────────────────────────
+
+  _fetch(url) {
+    console.log("[Miruro] fetch " + url.substring(0, 120));
+    try {
+      var raw = Native.fetch(String(url), "GET", JSON.stringify({
+        "User-Agent":      this.ua,
+        "Accept":          "text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer":         this.baseUrl + "/"
+      }), "");
       var j = {};
       try { j = JSON.parse(raw || "{}"); } catch (_) {}
-      console.log("[Miruro] fetch DONE status=" + (j.status || 0) + " bodyLen=" + String(j.body || "").length);
-      return { ok: !!j.ok, status: Number(j.status || 0), body: String(j.body || "") };
+      var status = Number(j.status || 0);
+      var bodyLen = String(j.body || "").length;
+      console.log("[Miruro] fetch status=" + status + " bodyLen=" + bodyLen);
+      if (!j.ok && status !== 304) return null;
+      return { body: String(j.body || "") };
     } catch (e) {
-      console.error("[Miruro] fetch EXCEPTION url=" + url + " err=" + e.message);
-      return { ok: false, status: 0, body: "" };
-    }
-  }
-
-  _getJson(url) {
-    var res = this._nativeFetch(url, "GET", {
-      "User-Agent":      this.ua,
-      "Accept":          "application/json",
-      "Accept-Language": "en-US,en;q=0.9"
-    }, "");
-    if (!res.body) {
-      console.warn("[Miruro] _getJson empty body url=" + url);
-      return null;
-    }
-    try {
-      return JSON.parse(res.body);
-    } catch (e) {
-      console.warn("[Miruro] _getJson parse error url=" + url + " preview=" + res.body.substring(0, 80));
+      console.error("[Miruro] fetch error: " + e.message);
       return null;
     }
   }
 
-  // ─────────────────────────────────────────────
-  // Arg / ID parsing
-  // ─────────────────────────────────────────────
+  // ─── Arg / ID parsing ─────────────────────────────────────────────────────
 
   _parseArg(arg) {
     if (typeof arg === "string") {
@@ -110,7 +152,6 @@ class Miruro {
     return t === "dub" ? "dub" : "sub";
   }
 
-  // Parse "anilistId/track"
   _parseMediaId(mediaId) {
     var raw   = String(mediaId || "").trim();
     var track = raw.toLowerCase().endsWith("/dub") ? "dub" : "sub";
@@ -118,7 +159,7 @@ class Miruro {
     return { anilistId: raw, track: track };
   }
 
-  // Parse "anilistId|consumetEpisodeId|epNumber/track"
+  // episodeId: "{anilistId}|{b64url_epId}|{epNum}|{provider}/{track}"
   _parseEpisodeObj(episodeObj) {
     var ep = episodeObj;
     if (typeof episodeObj === "string") {
@@ -127,19 +168,15 @@ class Miruro {
     var raw   = String((ep && ep.id) || "").trim();
     var track = raw.toLowerCase().endsWith("/dub") ? "dub" : "sub";
     raw = raw.replace(/\/(sub|dub)$/i, "");
-
-    // format: anilistId|consumetEpisodeId|epNumber
-    var parts      = raw.split("|");
-    var anilistId  = parts[0] || "";
-    var consumetId = parts[1] || "";
-    var epNum      = parseInt(parts[2] || "0", 10) || (ep && ep.number) || 0;
-
-    return { anilistId: anilistId, consumetId: consumetId, epNum: epNum, track: track };
+    var parts = raw.split("|");
+    return {
+      anilistId: parts[0] || "",
+      b64EpId:   parts[1] || "",
+      epNum:     parseInt(parts[2] || "0", 10) || (ep && ep.number) || 0,
+      provider:  parts[3] || "",
+      track:     track
+    };
   }
-
-  // ─────────────────────────────────────────────
-  // Title scoring
-  // ─────────────────────────────────────────────
 
   _normalize(s) {
     return String(s || "").toLowerCase()
@@ -147,7 +184,6 @@ class Miruro {
       .replace(/\biii\b/g, "3").replace(/\bii\b/g, "2").replace(/\biv\b/g, "4")
       .replace(/[^a-z0-9]+/g, "");
   }
-
   _scoreTitle(candidate, targets) {
     var c = this._normalize(candidate);
     if (!c) return 0;
@@ -155,21 +191,13 @@ class Miruro {
     for (var i = 0; i < targets.length; i++) {
       var t = this._normalize(targets[i]);
       if (!t) continue;
-      if (c === t)                             { best = Math.max(best, 1000); continue; }
+      if (c === t) { best = Math.max(best, 1000); continue; }
       if (c.indexOf(t) !== -1 || t.indexOf(c) !== -1) { best = Math.max(best, 850); continue; }
-      // prefix similarity
-      var shorter = c.length <= t.length ? c : t;
-      var longer  = c.length <= t.length ? t : c;
-      var pfx = 0;
-      while (pfx < shorter.length && shorter[pfx] === longer[pfx]) pfx++;
-      best = Math.max(best, Math.floor((pfx / shorter.length) * 0.7 * 700));
     }
     return best;
   }
 
-  // ─────────────────────────────────────────────
-  // search()
-  // ─────────────────────────────────────────────
+  // ─── search() ─────────────────────────────────────────────────────────────
 
   search(arg) {
     arg = this._parseArg(arg);
@@ -177,74 +205,52 @@ class Miruro {
     var track = this._getTrack(arg);
     var media = arg.media || {};
 
-    // ── Fast path: AniList ID is already available ──
-    // WaifuTV may pass it as arg.anilistId or arg.media.anilistId or arg.media.id
-    var directId = String(arg.anilistId || (media && media.anilistId) || (media && media.id) || "").trim();
+    // Fast path: AniList ID already known
+    var directId = String(arg.anilistId || media.anilistId || media.id || "").trim();
     if (directId && /^\d+$/.test(directId)) {
-      var displayTitle = (media.englishTitle || media.romajiTitle || q || ("Anime " + directId));
-      console.log("[Miruro] search using direct anilistId=" + directId + " track=" + track);
+      var title = media.englishTitle || media.romajiTitle || q || ("Anime " + directId);
+      console.log("[Miruro] search fast-path anilistId=" + directId + " track=" + track);
       return [{
-        id:        directId + "/" + track,
-        title:     displayTitle,
-        jname:     media.romajiTitle || "",
-        url:       "https://miruro.tv/watch/" + directId,
-        subOrDub:  track
+        id: directId + "/" + track, title: title,
+        jname: media.romajiTitle || "",
+        url: this.baseUrl + "/watch/" + directId, subOrDub: track
       }];
     }
 
     if (!q) return [];
 
-    // Build scoring targets from every title variant we know
     var targets = [q];
     if (media.englishTitle) targets.push(media.englishTitle);
     if (media.romajiTitle)  targets.push(media.romajiTitle);
     if (media.nativeTitle)  targets.push(media.nativeTitle);
-    if (media.altTitles && media.altTitles.length) {
-      for (var i = 0; i < media.altTitles.length; i++) targets.push(media.altTitles[i]);
-    }
+    if (media.altTitles) for (var i = 0; i < media.altTitles.length; i++) targets.push(media.altTitles[i]);
 
     console.log("[Miruro] search q=" + q + " track=" + track);
-
-    var data = this._getJson(this.baseUrl + "/meta/anilist/" + encodeURIComponent(q) + "?page=1&perPage=15");
-    if (!data || !data.results || !data.results.length) {
-      console.warn("[Miruro] search no results q=" + q);
-      return [];
+    var data = this._pipe("search", { q: q, limit: 15, offset: 0, type: "ANIME", sort: "POPULARITY_DESC" });
+    if (!data || !Array.isArray(data) || !data.length) {
+      console.warn("[Miruro] search no results q=" + q); return [];
     }
 
     var out = [];
-    for (var r = 0; r < data.results.length; r++) {
-      var item = data.results[r];
+    for (var r = 0; r < data.length; r++) {
+      var item = data[r];
       if (!item || !item.id) continue;
-
-      var en  = (item.title && item.title.english)        || "";
-      var ro  = (item.title && item.title.romaji)         || "";
-      var na  = (item.title && item.title.native)         || "";
+      var en  = (item.title && item.title.english) || "";
+      var ro  = (item.title && item.title.romaji)  || "";
       var pri = en || ro || ("Anime " + item.id);
-
-      var score = Math.max(
-        this._scoreTitle(en, targets),
-        this._scoreTitle(ro, targets),
-        this._scoreTitle(na, targets)
-      );
-
       out.push({
-        id:       String(item.id) + "/" + track,
-        title:    pri,
-        jname:    ro !== pri ? ro : na,
-        url:      "https://miruro.tv/watch/" + item.id,
+        id: String(item.id) + "/" + track, title: pri,
+        jname: ro !== pri ? ro : "", url: this.baseUrl + "/watch/" + item.id,
         subOrDub: track,
-        _score:   score
+        _score: Math.max(this._scoreTitle(en, targets), this._scoreTitle(ro, targets))
       });
     }
-
     out.sort(function(a, b) { return b._score - a._score; });
-    console.log("[Miruro] search found=" + out.length + " topId=" + (out[0] ? out[0].id : "none") + " topScore=" + (out[0] ? out[0]._score : 0));
+    console.log("[Miruro] search found=" + out.length + " top=" + (out[0] ? out[0].id : "none"));
     return out.map(function(x) { delete x._score; return x; });
   }
 
-  // ─────────────────────────────────────────────
-  // findEpisodes()
-  // ─────────────────────────────────────────────
+  // ─── findEpisodes() ───────────────────────────────────────────────────────
 
   findEpisodes(mediaId) {
     console.log("[Miruro] findEpisodes START mediaId=" + mediaId);
@@ -255,88 +261,98 @@ class Miruro {
     if (!anilistId) { console.error("[Miruro] findEpisodes ABORT empty anilistId"); return []; }
 
     var cacheKey = anilistId + "|" + track;
-    var cached   = this._cacheGet(this._episodeCache, this._episodeTimeMap, cacheKey);
+    var cached   = this._cacheGet(this._episodeCache, this._episodeCacheTime, cacheKey);
     if (cached !== undefined) {
       console.log("[Miruro] findEpisodes CACHE HIT count=" + cached.length);
       return cached;
     }
 
-    // Use /meta/anilist/info/{id} — the Miruro Consumet deployment does not expose
-    // the separate /meta/anilist/episodes/{id} route (returns 404).
-    // The info endpoint returns the full object including an `episodes` array.
-    var url = this.baseUrl + "/meta/anilist/info/" + encodeURIComponent(anilistId) + "?provider=zoro";
-    console.log("[Miruro] findEpisodes url=" + url);
-    var data = this._getJson(url);
-
-    if (!data) {
-      console.error("[Miruro] findEpisodes null response anilistId=" + anilistId);
+    var data = this._pipe("episodes", { anilistId: anilistId });
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      console.error("[Miruro] findEpisodes null/bad response anilistId=" + anilistId);
       return [];
     }
 
-    // Episodes live under data.episodes
-    var epArray = data.episodes;
-    if (!epArray || !Array.isArray(epArray) || !epArray.length) {
-      console.error("[Miruro] findEpisodes no episodes array anilistId=" + anilistId + " keys=" + Object.keys(data).join(","));
-      return [];
+    // Cache malId if present (some episode responses include it)
+    if (data._malId && !this._malIdCache[anilistId]) {
+      this._malIdCache[anilistId] = String(data._malId);
     }
 
-    // Cache malId now — saves an extra /info call later when AniSkip runs
-    if (data.malId && !this._malIdCache[anilistId]) {
-      this._malIdCache[anilistId] = String(data.malId);
-      console.log("[Miruro] findEpisodes cached malId=" + data.malId + " for anilistId=" + anilistId);
+    // Select best provider for this track
+    var providerOrder = track === "dub" ? this._dubProviders : this._subProviders;
+    var chosenProvider = null;
+    var chosenEps = [];
+
+    for (var pi = 0; pi < providerOrder.length; pi++) {
+      var pname = providerOrder[pi];
+      var pdata = data[pname];
+      if (!pdata || !pdata.episodes) continue;
+      var eps = pdata.episodes[track === "dub" ? "dub" : "sub"] || [];
+      if (eps.length > 0) {
+        chosenProvider = pname;
+        chosenEps = eps;
+        console.log("[Miruro] findEpisodes provider=" + pname + " count=" + eps.length);
+        break;
+      }
+    }
+
+    // Last resort: any provider with most episodes
+    if (!chosenEps.length) {
+      var keys = Object.keys(data);
+      for (var ki = 0; ki < keys.length; ki++) {
+        var kdata = data[keys[ki]];
+        if (!kdata || !kdata.episodes) continue;
+        var keps = kdata.episodes[track === "dub" ? "dub" : "sub"] || [];
+        if (keps.length > chosenEps.length) { chosenProvider = keys[ki]; chosenEps = keps; }
+      }
+    }
+
+    if (!chosenEps.length) {
+      console.error("[Miruro] findEpisodes no episodes anilistId=" + anilistId + " track=" + track);
+      return [];
     }
 
     var episodes = [];
-    for (var i = 0; i < epArray.length; i++) {
-      var ep    = epArray[i];
+    for (var i = 0; i < chosenEps.length; i++) {
+      var ep    = chosenEps[i];
       if (!ep || !ep.id) continue;
       var epNum = ep.number || (i + 1);
-
-      // Encode anilistId + consumetId + epNumber into the id so findEpisodeServer
-      // has everything it needs without an extra lookup.
       episodes.push({
-        id:     anilistId + "|" + ep.id + "|" + epNum + "/" + track,
+        id:     anilistId + "|" + ep.id + "|" + epNum + "|" + chosenProvider + "/" + track,
         number: epNum,
         title:  ep.title || ("Episode " + epNum),
-        url:    "https://miruro.tv/watch/" + anilistId + "?ep=" + epNum,
+        url:    this.baseUrl + "/watch/" + anilistId + "?ep=" + epNum,
         image:  ep.image || ""
       });
     }
 
     episodes.sort(function(a, b) { return a.number - b.number; });
-    console.log("[Miruro] findEpisodes SUCCESS count=" + episodes.length);
+    console.log("[Miruro] findEpisodes SUCCESS count=" + episodes.length + " provider=" + chosenProvider);
 
-    this._cacheSet(this._episodeCache, this._episodeTimeMap, cacheKey, episodes);
+    this._cacheSet(this._episodeCache, this._episodeCacheTime, cacheKey, episodes);
     return episodes;
   }
 
-  // ─────────────────────────────────────────────
-  // AniSkip helper (intro / outro timestamps)
-  // ─────────────────────────────────────────────
+  // ─── AniSkip (fallback intro/outro) ──────────────────────────────────────
 
   _getMalId(anilistId) {
     if (this._malIdCache[anilistId]) return this._malIdCache[anilistId];
-    try {
-      var data  = this._getJson(this.baseUrl + "/meta/anilist/info/" + encodeURIComponent(anilistId));
-      var malId = data && data.malId ? String(data.malId) : null;
-      if (malId) {
-        this._malIdCache[anilistId] = malId;
-        console.log("[Miruro] _getMalId anilistId=" + anilistId + " → malId=" + malId);
-      }
-      return malId;
-    } catch (e) {
-      console.warn("[Miruro] _getMalId error=" + e.message);
-      return null;
+    var info = this._pipe("info/" + anilistId, {});
+    if (info && info.malId) {
+      this._malIdCache[anilistId] = String(info.malId);
+      return this._malIdCache[anilistId];
     }
+    return null;
   }
 
   _getAniSkip(malId, epNum) {
     if (!malId || !epNum) return null;
     try {
-      var url  = this.aniskipUrl + "/skip-times/" + malId + "/" + epNum + "?types=op&types=ed&episodeLength=0";
-      var data = this._getJson(url);
+      var url = this.aniskipUrl + "/skip-times/" + malId + "/" + epNum + "?types=op&types=ed&episodeLength=0";
+      var res = this._fetch(url);
+      if (!res || !res.body) return null;
+      var data = JSON.parse(res.body);
       if (!data || !data.results || !data.results.length) return null;
-
       var intro = null, outro = null;
       for (var i = 0; i < data.results.length; i++) {
         var item     = data.results[i];
@@ -344,106 +360,88 @@ class Miruro {
         var start    = Number(interval.startTime || 0);
         var end      = Number(interval.endTime   || 0);
         if (end <= start) continue;
-
         var type = String(item.skipType || "").toLowerCase();
-        if (type === "op" || type === "mixed-op") {
-          intro = { start: start, end: end };
-        } else if (type === "ed" || type === "mixed-ed" || type === "recap") {
-          outro = { start: start, end: end };
-        }
+        if (type === "op" || type === "mixed-op")      intro = { start: start, end: end };
+        else if (type === "ed" || type === "mixed-ed") outro = { start: start, end: end };
       }
-
       if (intro) console.log("[Miruro] AniSkip intro=" + JSON.stringify(intro));
       if (outro) console.log("[Miruro] AniSkip outro=" + JSON.stringify(outro));
       return { intro: intro, outro: outro };
     } catch (e) {
-      console.warn("[Miruro] _getAniSkip error=" + e.message);
+      console.warn("[Miruro] _getAniSkip error: " + e.message);
       return null;
     }
   }
 
-  // ─────────────────────────────────────────────
-  // findEpisodeServer()
-  // ─────────────────────────────────────────────
+  // ─── findEpisodeServer() ──────────────────────────────────────────────────
 
   findEpisodeServer(episodeObj, serverName) {
-    console.log("[Miruro] findEpisodeServer START episodeObj=" + JSON.stringify(episodeObj) + " server=" + serverName);
+    console.log("[Miruro] findEpisodeServer START obj=" + JSON.stringify(episodeObj));
     var ep = this._parseEpisodeObj(episodeObj);
-    console.log("[Miruro] findEpisodeServer parsed anilistId=" + ep.anilistId + " consumetId=" + ep.consumetId + " epNum=" + ep.epNum + " track=" + ep.track);
+    console.log("[Miruro] findEpisodeServer anilistId=" + ep.anilistId
+      + " provider=" + ep.provider + " epNum=" + ep.epNum + " track=" + ep.track);
 
-    if (!ep.consumetId) throw new Error("Missing consumet episode ID");
+    if (!ep.b64EpId)  throw new Error("Missing episode ID");
+    if (!ep.provider) throw new Error("Missing provider");
 
-    var cacheKey = "srv:" + ep.consumetId + ":" + ep.track;
-    var cached   = this._cacheGet(this._serverCache, this._serverTimeMap, cacheKey);
-    if (cached !== undefined) {
-      console.log("[Miruro] findEpisodeServer CACHE HIT");
-      return cached;
+    var cacheKey = ep.b64EpId + ":" + ep.provider + ":" + ep.track;
+    var cached   = this._cacheGet(this._serverCache, this._serverCacheTime, cacheKey);
+    if (cached !== undefined) { console.log("[Miruro] findEpisodeServer CACHE HIT"); return cached; }
+
+    var query = {
+      episodeId: ep.b64EpId,
+      provider:  ep.provider,
+      category:  ep.track === "dub" ? "dub" : "sub"
+    };
+    if (ep.anilistId) query.anilistId = parseInt(ep.anilistId, 10) || ep.anilistId;
+
+    var data = this._pipe("sources", query);
+    if (!data) throw new Error("No response from sources");
+
+    var streams = data.streams || [];
+    if (!streams.length) throw new Error("No streams returned");
+
+    // Pick best active HLS stream, highest quality
+    var best = null;
+    for (var i = 0; i < streams.length; i++) {
+      var s = streams[i];
+      if (s.type !== "hls" || !s.url) continue;
+      if (!best) { best = s; continue; }
+      var sActive = s.isActive !== false;
+      var bActive = best.isActive !== false;
+      var sq = parseInt(String(s.quality || "0"), 10) || 0;
+      var bq = parseInt(String(best.quality || "0"), 10) || 0;
+      if (sActive && !bActive) { best = s; continue; }
+      if (sq > bq && (sActive || !bActive)) best = s;
     }
-
-    var subOrDub = ep.track === "dub" ? "dub" : "sub";
-    var url = this.baseUrl + "/meta/anilist/watch/"
-      + encodeURIComponent(ep.consumetId)
-      + "?provider=zoro&subOrDub=" + subOrDub;
-
-    console.log("[Miruro] findEpisodeServer watch url=" + url);
-    var data = this._getJson(url);
-    if (!data) throw new Error("No response from Consumet watch endpoint");
-
-    // ── Sources ──────────────────────────────────
-    var sources = data.sources || [];
-    if (!sources.length) throw new Error("No video sources returned");
-
-    // Prefer m3u8, then best quality within m3u8
-    var stream = null;
-    for (var i = 0; i < sources.length; i++) {
-      var s = sources[i];
-      var u = s.url || s.file || "";
-      if (!u) continue;
-      if (s.isM3U8 === true || u.indexOf(".m3u8") !== -1) {
-        if (!stream) { stream = s; continue; }
-        // Prefer 1080p > 720p > auto
-        var q = String(s.quality || "").toLowerCase();
-        var cur = String(stream.quality || "").toLowerCase();
-        if (q.indexOf("1080") !== -1 && cur.indexOf("1080") === -1) stream = s;
-        else if (q.indexOf("720") !== -1 && cur.indexOf("1080") === -1 && cur.indexOf("720") === -1) stream = s;
+    if (!best) {
+      for (var j = 0; j < streams.length; j++) {
+        if (streams[j].type !== "embed" && streams[j].url) { best = streams[j]; break; }
       }
     }
-    // Fallback: first source regardless of type
-    if (!stream) {
-      for (var k = 0; k < sources.length; k++) {
-        if (sources[k].url || sources[k].file) { stream = sources[k]; break; }
-      }
-    }
-    if (!stream) throw new Error("No playable source found");
+    if (!best || !best.url) throw new Error("No playable stream");
 
-    var streamUrl  = stream.url  || stream.file || "";
-    var streamType = (stream.isM3U8 === true || streamUrl.indexOf(".m3u8") !== -1) ? "m3u8"
-                   : streamUrl.indexOf(".mpd") !== -1 ? "mpd"
-                   : "mp4";
+    var streamUrl = best.url;
+    var referer   = best.referer || "https://miruro.tv/";
+    var origin    = referer.replace(/\/+$/, "").split("/").slice(0, 3).join("/");
 
-    // ── Subtitles ─────────────────────────────────
-    // Consumet/zoro returns VTT subtitle tracks — these get passed to ExoPlayer
+    // Subtitles (zoro provider returns VTT tracks)
     var subtitles = [];
     var tracks = data.subtitles || data.tracks || [];
-    for (var j = 0; j < tracks.length; j++) {
-      var t    = tracks[j];
+    for (var k = 0; k < tracks.length; k++) {
+      var t = tracks[k];
       var tUrl = t.url || t.file || "";
       if (!tUrl) continue;
       var lang = t.lang || t.label || t.language || "Unknown";
-      // Filter out thumbnails track
       if (lang.toLowerCase() === "thumbnails" || t.kind === "thumbnails") continue;
       subtitles.push({
-        id:        "sub-" + j,
-        language:  lang,
-        url:       tUrl,
+        id: "sub-" + k, language: lang, url: tUrl,
         isDefault: !!(t.default || lang.toLowerCase() === "english")
       });
     }
 
-    // ── Intro / Outro ────────────────────────────
+    // Intro/outro — arc (AnimeKai via Miruro) returns these directly
     var intro = null, outro = null;
-
-    // Consumet sometimes includes these directly in the response
     if (data.intro && data.intro.start !== undefined && data.intro.end !== undefined) {
       var is = Number(data.intro.start), ie = Number(data.intro.end);
       if (ie > is) intro = { start: is, end: ie };
@@ -453,7 +451,7 @@ class Miruro {
       if (oe > os) outro = { start: os, end: oe };
     }
 
-    // Fallback: AniSkip (same source Miruro itself uses)
+    // AniSkip fallback for providers that don't return timestamps
     if (!intro && !outro && ep.anilistId && ep.epNum) {
       var malId = this._getMalId(ep.anilistId);
       if (malId) {
@@ -462,28 +460,21 @@ class Miruro {
       }
     }
 
-    // ── Response ─────────────────────────────────
-    var referer = (data.headers && (data.headers.Referer || data.headers.referer)) || "https://hianime.to/";
-    var origin  = referer.replace(/\/+$/, "").split("/").slice(0, 3).join("/");
-
-    console.log("[Miruro] findEpisodeServer SUCCESS"
-      + " url="   + streamUrl.substring(0, 80)
-      + " type="  + streamType
-      + " subs="  + subtitles.length
-      + " intro=" + !!intro
-      + " outro=" + !!outro);
+    console.log("[Miruro] findEpisodeServer SUCCESS url=" + streamUrl.substring(0, 80)
+      + " subs=" + subtitles.length + " intro=" + !!intro + " outro=" + !!outro);
 
     var resp = {
-      server:       serverName || "zoro",
+      server:       ep.provider,
       headers:      { "Referer": referer, "Origin": origin, "User-Agent": this.ua },
-      videoSources: [{ url: streamUrl, file: streamUrl, type: streamType, quality: stream.quality || "auto", subtitles: subtitles }],
-      sources:      [{ url: streamUrl, file: streamUrl, type: streamType, quality: stream.quality || "auto" }],
+      videoSources: [{ url: streamUrl, file: streamUrl, type: "m3u8",
+                       quality: best.quality || "auto", subtitles: subtitles }],
+      sources:      [{ url: streamUrl, file: streamUrl, type: "m3u8", quality: best.quality || "auto" }],
       subtitles:    subtitles,
       intro:        intro,
       outro:        outro
     };
 
-    this._cacheSet(this._serverCache, this._serverTimeMap, cacheKey, resp);
+    this._cacheSet(this._serverCache, this._serverCacheTime, cacheKey, resp);
     return resp;
   }
 }
