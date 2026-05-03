@@ -865,7 +865,42 @@ class AnimeKai {
         var subJson = this._fetchJson(subList, this._headers({ "Accept": "*/*", "Referer": origin + "/", "Origin": origin }));
         if (subJson && subJson.length) result.tracks = subJson;
       }
-      return { sources: result.sources, tracks: result.tracks || [], referer: origin + "/" };
+
+      // Extract intro/outro timestamps from the dec-mega result.
+      // The API may return them in various shapes — normalise all into
+      // { start: <seconds>, end: <seconds> } so the Kotlin readSkipRange can parse them.
+      function _toSkipRange(val) {
+        if (!val || typeof val !== "object") return null;
+        // Shape 1: { startMs, endMs }  (milliseconds)
+        if (val.startMs !== undefined && val.endMs !== undefined) {
+          return { start: val.startMs / 1000, end: val.endMs / 1000 };
+        }
+        // Shape 2: { start, end }  (seconds — already correct)
+        if (val.start !== undefined && val.end !== undefined) {
+          return { start: Number(val.start), end: Number(val.end) };
+        }
+        // Shape 3: { from, to }  (seconds)
+        if (val.from !== undefined && val.to !== undefined) {
+          return { start: Number(val.from), end: Number(val.to) };
+        }
+        // Shape 4: { interval: { startTime, endTime } }
+        if (val.interval) return _toSkipRange(val.interval);
+        return null;
+      }
+
+      var intro = _toSkipRange(result.intro || result.opening || result.op || null);
+      var outro = _toSkipRange(result.outro || result.ending || result.ed || null);
+
+      if (intro) console.log("[AnimeKai] _extractMegaUp intro=" + JSON.stringify(intro));
+      if (outro) console.log("[AnimeKai] _extractMegaUp outro=" + JSON.stringify(outro));
+
+      return {
+        sources: result.sources,
+        tracks: result.tracks || [],
+        referer: origin + "/",
+        intro: intro,
+        outro: outro
+      };
     } catch (e) {
       console.error("[AnimeKai] _extractMegaUp EXCEPTION: " + e.message);
       return null;
@@ -966,14 +1001,21 @@ class AnimeKai {
     var subtitles = this._normalizeTracks(extracted.tracks || []);
     var type = String(url).indexOf(".mpd") !== -1 ? "mpd" : String(url).indexOf(".m3u8") !== -1 || stream.type === "hls" ? "m3u8" : "mp4";
 
-    console.log("[AnimeKai] findEpisodeServer SUCCESS url=" + url.substring(0, 80) + " type=" + type + " subtitles=" + subtitles.length);
+    // Prefer intro/outro from the extracted result object.
+    // Some embed hosts embed them on each source entry too — check both.
+    var intro = extracted.intro || (stream.intro ? stream.intro : null) || null;
+    var outro = extracted.outro || (stream.outro ? stream.outro : null) || null;
+
+    console.log("[AnimeKai] findEpisodeServer SUCCESS url=" + url.substring(0, 80) + " type=" + type + " subtitles=" + subtitles.length + " intro=" + !!intro + " outro=" + !!outro);
 
     var resp = {
       server: chosen.label || chosen.name || "default",
       headers: { "Referer": extracted.referer || origin + "/", "Origin": origin, "User-Agent": this.ua },
       videoSources: [{ url: url, file: url, type: type, quality: stream.quality || "auto", subtitles: subtitles }],
       sources: [{ url: url, file: url, type: type, quality: stream.quality || "auto" }],
-      subtitles: subtitles
+      subtitles: subtitles,
+      intro: intro,
+      outro: outro
     };
     this._cacheSet(this._serverCache, this._serverCacheTime, cacheKey, resp);
     return resp;
