@@ -201,12 +201,38 @@ var _MiruroCodec = (function () {
     return out;
   }
 
-  // Decode Miruro's obfuscated response: base64url(gzip(json)) → parsed object
+  // Decode Miruro's obfuscated response body.
+  // Handles three formats the server may return:
+  //   (a) base64url(gzip(json))  — standard, most responses
+  //   (b) base64url(json)        — some responses skip gzip
+  //   (c) plain JSON             — fallback
   function decodeBody(body) {
-    if (!body || body.length < 8) return null;
-    var bytes   = b64UrlDecode(body);
-    var rawJson = bytesToStr(gunzip(bytes));
-    return JSON.parse(rawJson);
+    if (!body || body.length < 4) return null;
+
+    // Fast path: plain JSON (body starts with { or [)
+    var first = body.trim()[0];
+    if (first === "{" || first === "[") {
+      try { return JSON.parse(body.trim()); } catch (_) {}
+    }
+
+    // Base64url decode
+    var bytes;
+    try { bytes = b64UrlDecode(body); } catch (e) { return null; }
+    if (!bytes || bytes.length < 2) return null;
+
+    // (a) gzip magic bytes 0x1f 0x8b
+    if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+      return JSON.parse(bytesToStr(gunzip(bytes)));
+    }
+
+    // (b) decoded bytes are raw JSON (no gzip wrapper)
+    var asStr = bytesToStr(bytes);
+    var firstDecoded = asStr.trim()[0];
+    if (firstDecoded === "{" || firstDecoded === "[") {
+      return JSON.parse(asStr.trim());
+    }
+
+    throw new Error("unrecognised response format bytes[0]=" + bytes[0] + " bytes[1]=" + bytes[1]);
   }
 
   return { b64UrlEncode: b64UrlEncode, decodeBody: decodeBody };
