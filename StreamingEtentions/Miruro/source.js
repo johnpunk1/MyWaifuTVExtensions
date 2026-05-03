@@ -261,19 +261,34 @@ class Miruro {
       return cached;
     }
 
-    // Consumet zoro provider handles both sub and dub in the same episode list.
-    var url = this.baseUrl + "/meta/anilist/episodes/" + encodeURIComponent(anilistId) + "?provider=zoro";
+    // Use /meta/anilist/info/{id} — the Miruro Consumet deployment does not expose
+    // the separate /meta/anilist/episodes/{id} route (returns 404).
+    // The info endpoint returns the full object including an `episodes` array.
+    var url = this.baseUrl + "/meta/anilist/info/" + encodeURIComponent(anilistId) + "?provider=zoro";
     console.log("[Miruro] findEpisodes url=" + url);
     var data = this._getJson(url);
 
-    if (!data || !Array.isArray(data) || !data.length) {
-      console.error("[Miruro] findEpisodes empty or invalid response anilistId=" + anilistId);
+    if (!data) {
+      console.error("[Miruro] findEpisodes null response anilistId=" + anilistId);
       return [];
     }
 
+    // Episodes live under data.episodes
+    var epArray = data.episodes;
+    if (!epArray || !Array.isArray(epArray) || !epArray.length) {
+      console.error("[Miruro] findEpisodes no episodes array anilistId=" + anilistId + " keys=" + Object.keys(data).join(","));
+      return [];
+    }
+
+    // Cache malId now — saves an extra /info call later when AniSkip runs
+    if (data.malId && !this._malIdCache[anilistId]) {
+      this._malIdCache[anilistId] = String(data.malId);
+      console.log("[Miruro] findEpisodes cached malId=" + data.malId + " for anilistId=" + anilistId);
+    }
+
     var episodes = [];
-    for (var i = 0; i < data.length; i++) {
-      var ep    = data[i];
+    for (var i = 0; i < epArray.length; i++) {
+      var ep    = epArray[i];
       if (!ep || !ep.id) continue;
       var epNum = ep.number || (i + 1);
 
