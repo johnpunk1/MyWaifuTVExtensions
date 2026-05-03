@@ -1,0 +1,15 @@
+{
+  "id": "miruro",
+  "name": "Miruro",
+  "version": "1.0.0",
+  "entry": "source.js",
+  "type": "anime-streaming",
+  "website": "https://www.miruro.tv",
+  "supportsSub": true,
+  "supportsDub": true,
+  "supportsHls": true,
+  "supportsPlayback": true,
+  "episodeServers": [
+    "default"
+  ]
+}
