@@ -298,6 +298,9 @@ class Miruro {
     console.log("[Miruro] pipe path=" + path);
     var res = this._fetch(url);
     if (!res || !res.body) { console.warn("[Miruro] pipe empty path=" + path); return null; }
+    // Log body preview to diagnose format (first 60 chars + char codes of first 2 decoded bytes)
+    var bodyPreview = res.body.substring(0, 60);
+    console.log("[Miruro] pipe body_preview=" + bodyPreview);
     try {
       var data = _MiruroCodec.decodeBody(res.body);
       if (!data) console.warn("[Miruro] pipe decode null path=" + path);
